@@ -5,7 +5,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { requireAuth } from '../../middleware/auth.js';
+import { requireAuth, verifyFirebaseToken } from '../../middleware/auth.js';
 import { validateBody } from '../../middleware/validate.js';
 import { registerUserSchema, updateProfileSchema } from '../../schemas/user.schemas.js';
 import * as userService from '../../services/userService.js';
@@ -49,10 +49,9 @@ export async function userRoutes(app: FastifyInstance) {
                         });
                     }
 
-                    const { getAuth } = await import('firebase-admin/auth');
                     try {
                         const token = authHeader.slice(7);
-                        const decoded = await getAuth().verifyIdToken(token, true);
+                        const decoded = await verifyFirebaseToken(token);
                         // Attach minimal user info for registration
                         (request as any)._firebaseUid = decoded.uid;
                         (request as any)._firebaseEmail = decoded.email || '';

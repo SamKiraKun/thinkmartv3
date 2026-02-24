@@ -67,10 +67,48 @@ declare module 'fastify' {
 // ─── Token Verification ─────────────────────────────────────────────
 
 export async function verifyFirebaseToken(token: string): Promise<DecodedIdToken> {
+    const hasServiceAccountFile =
+        Boolean(env.GOOGLE_APPLICATION_CREDENTIALS) &&
+        existsSync(env.GOOGLE_APPLICATION_CREDENTIALS);
+
     try {
-        return await getAuth().verifyIdToken(token, true);
+        // Revocation checks require admin credentials that can call Firebase Auth APIs.
+        // On some hosts (e.g. Render without a mounted service account), verifying the
+        // token itself works but revocation checks fail with credential errors.
+        return await getAuth().verifyIdToken(token, hasServiceAccountFile);
     } catch (err) {
-        logger.debug({ err }, 'Firebase token verification failed');
+        const code = typeof err === 'object' && err && 'code' in err ? String((err as { code?: unknown }).code) : '';
+        const message =
+            typeof err === 'object' && err && 'message' in err
+                ? String((err as { message?: unknown }).message)
+                : '';
+
+        const looksLikeCredentialIssue =
+            code.startsWith('app/') ||
+            code === 'auth/insufficient-permission' ||
+            /credential|permission|iam|metadata server|access token/i.test(message);
+
+        // Fallback: skip revocation check if the host lacks Firebase Admin credentials.
+        // This preserves auth for production traffic while still validating signature/issuer/audience.
+        if (hasServiceAccountFile && looksLikeCredentialIssue) {
+            logger.warn({ code, message }, 'Revocation check failed due to Firebase Admin credentials; retrying without revocation check');
+            try {
+                return await getAuth().verifyIdToken(token, false);
+            } catch {
+                // Fall through to normalized unauthorized error below.
+            }
+        }
+
+        logger.warn(
+            {
+                code,
+                message,
+                hasServiceAccountFile,
+                firebaseProjectId: env.FIREBASE_PROJECT_ID ?? null,
+            },
+            'Firebase token verification failed'
+        );
+        logger.debug({ err }, 'Firebase token verification failed (raw)');
         throw new UnauthorizedError('Invalid or expired token');
     }
 }
