@@ -5,10 +5,10 @@
 -- ORDERS: add columns used by route handlers
 -- ============================================================================
 
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS coupon_code TEXT;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS coupon_discount REAL NOT NULL DEFAULT 0;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_number TEXT;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE orders ADD COLUMN coupon_code TEXT;
+ALTER TABLE orders ADD COLUMN coupon_discount REAL NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN tracking_number TEXT;
+ALTER TABLE orders ADD COLUMN admin_notes TEXT;
 
 -- ============================================================================
 -- TRANSACTIONS: extend type CHECK to include ADMIN_CREDIT
