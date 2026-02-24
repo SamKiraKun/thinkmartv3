@@ -1,0 +1,67 @@
+ThinkMart Development Analysis & Roadmap
+
+1. Codebase Evaluation
+
+The current codebase provides a solid foundation using a modern stack (Next.js 14, TypeScript, Tailwind, Firebase).
+
+Structure: The separation of concerns (Components, Services, Store, Functions) is well-maintained.
+
+UI/UX: The dashboard and component architecture (SurveyCard, SpinWheel, Sidebar) are in place and visually structured.
+
+Data Models: The TypeScript interfaces (User, Wallet, Product) align well with the business requirements.
+
+2. Identified Gaps & Critical Missing Pieces
+
+While the "Shell" is ready, the "Engine" (Business Logic) needs connection.
+
+A. The "Disconnect" in Registration
+
+Current State: The registration page creates an Auth user.
+
+The Gap: It doesn't robustly handle the immediate assignment of the referral hierarchy. If a user enters a code, we need to validate it server-side or securely on the client and immediately link them in the database to ensure the upline gets their 500 coins.
+
+Risk: Users signing up without their upline getting credit.
+
+B. MLM Income & Membership Locking
+
+Current State: The logic exists in theory.
+
+The Gap: The actual trigger to distribute income when a task is done is complex. We need to ensure that level 1 to level 6 payouts only happen if the upline has membershipActive: true.
+
+Risk: Free users earning team income they shouldn't have access to.
+
+C. Partner Commission (The 20% Cut)
+
+Current State: Concepts defined.
+
+The Gap: There is no active listener observing Withdrawals or Orders to credit the City Partner.
+
+Risk: Partners not seeing earnings, leading to platform abandonment.
+
+D. Security Rules
+
+Current State: Basic rules provided.
+
+The Gap: We need to ensure users cannot simply write balance: 1000000 to their wallet via the frontend. Wallet balances must be read-only for the client and updated only via Cloud Functions or Admin SDK.
+
+3. Recommended Phase: "Core Revenue & MLM Engine"
+
+Goal: Make the platform fully functional from a money/points perspective.
+
+Priority Tasks (Implemented in this response):
+
+Cloud Triggers: Deploy listeners for onUserCreate (Referrals) and onTransaction (Partner Commission).
+
+MLM Distribution: Implement the 6-level loop with the membershipActive check.
+
+Upgrade Flow: Allow users to pay ₹1000 (mocked) to flip their status to Active and unlock earnings.
+
+Registration Hardening: Ensure Firestore profiles are created with correct City/State data for Partners to track.
+
+Next Steps (After this implementation):
+
+Ads Integration: Implement the TaskTimer + AdView verification logic.
+
+Payment Gateway: Replace the mock payment in Upgrade and Shop with Razorpay/Stripe.
+
+Admin Analytics: Populate the "God Mode" dashboard with real aggregation queries.

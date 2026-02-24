@@ -1,5 +1,6 @@
 # Ignore dependencies
 /node_modules
+**/node_modules/
 
 # Ignore outputs
 /functions/lib
@@ -14,6 +15,7 @@ server/.env.local
 # Ignore IDE files
 .vscode
 .idea
+.config
 *.swp
 *.swo
 
@@ -30,6 +32,10 @@ build
 
 # Firebase local artifacts
 .firebase
+
+# Local/archive folders not meant for source control
+_cleanpush/
+progress/
 
 # Ignore test outputs
 coverage
