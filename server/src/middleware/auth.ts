@@ -67,9 +67,11 @@ declare module 'fastify' {
 // ─── Token Verification ─────────────────────────────────────────────
 
 export async function verifyFirebaseToken(token: string): Promise<DecodedIdToken> {
+    const credPath = env.GOOGLE_APPLICATION_CREDENTIALS;
     const hasServiceAccountFile =
-        Boolean(env.GOOGLE_APPLICATION_CREDENTIALS) &&
-        existsSync(env.GOOGLE_APPLICATION_CREDENTIALS);
+        typeof credPath === 'string' &&
+        credPath.length > 0 &&
+        existsSync(credPath);
 
     try {
         // Revocation checks require admin credentials that can call Firebase Auth APIs.
