@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "periodtracker-733c2"
+  },
+  "targets": {
+    "periodtracker-733c2": {
+      "hosting": {
+        "ecomearn-app": [
+          "periodtracker-733c2"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "user_id": "user_001",
+    "coin_balance": 1250.5,
+    "cash_balance": 4500.75,
+    "total_earnings": 12000,
+    "total_withdrawals": 7500,
+    "updated_at": "2025-06-20T00:00:00.000Z"
+  },
+  {
+    "user_id": "user_002",
+    "coin_balance": 340,
+    "cash_balance": 1200,
+    "total_earnings": 2500,
+    "total_withdrawals": 1300,
+    "updated_at": "2025-07-01T00:00:00.000Z"
+  },
+  {
+    "user_id": "admin_001",
+    "coin_balance": 0,
+    "cash_balance": 0,
+    "total_earnings": 0,
+    "total_withdrawals": 0,
+    "updated_at": "2025-08-01T00:00:00.000Z"
+  }
+]

@@ -1,0 +1,21 @@
+[
+  {
+    "id": "order_001",
+    "user_id": "user_001",
+    "user_email": "rahul.sharma@example.com",
+    "user_name": "Rahul Sharma",
+    "items": "[{\"productId\":\"prod_001\",\"productName\":\"Organic Green Tea (100 bags)\",\"quantity\":2,\"unitPrice\":499,\"coinPrice\":200}]",
+    "subtotal": 998,
+    "cash_paid": 998,
+    "coins_redeemed": 0,
+    "coin_value": 0,
+    "shipping_address": "{\"fullName\":\"Rahul Sharma\",\"phone\":\"+919876543210\",\"addressLine1\":\"123 Main St\",\"city\":\"Mumbai\",\"state\":\"Maharashtra\",\"pincode\":\"400001\"}",
+    "status": "delivered",
+    "status_history": "[{\"status\":\"pending\",\"at\":{\"_seconds\":1744243200,\"_nanoseconds\":0}},{\"status\":\"confirmed\",\"at\":{\"_seconds\":1744243200,\"_nanoseconds\":0}},{\"status\":\"shipped\",\"at\":{\"_seconds\":1744416000,\"_nanoseconds\":0}},{\"status\":\"delivered\",\"at\":{\"_seconds\":1744675200,\"_nanoseconds\":0}}]",
+    "city": "Mumbai",
+    "refund_reason": null,
+    "refunded_at": null,
+    "created_at": "2025-04-10T00:00:00.000Z",
+    "updated_at": "2025-04-15T00:00:00.000Z"
+  }
+]

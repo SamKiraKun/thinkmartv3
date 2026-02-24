@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java (Emulators)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Install Root Dependencies
+        run: npm ci
+
+      - name: Install Functions Dependencies
+        run: npm ci --prefix functions
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build App
+        run: npm run build
+
+      - name: Build Functions
+        run: npm run build --prefix functions
+
+      - name: Rules Tests (Firestore + Storage)
+        run: npm run test:rules

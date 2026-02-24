@@ -1,0 +1,58 @@
+[
+  {
+    "_id": "txn_001",
+    "userId": "user_001",
+    "type": "TASK_REWARD",
+    "amount": 50,
+    "currency": "COIN",
+    "status": "COMPLETED",
+    "description": "Completed daily survey",
+    "taskId": "task_001",
+    "taskType": "SURVEY",
+    "createdAt": {
+      "_seconds": 1741996800,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "txn_002",
+    "userId": "user_001",
+    "type": "REFERRAL_BONUS",
+    "amount": 200,
+    "currency": "CASH",
+    "status": "COMPLETED",
+    "description": "Referral bonus for user_002",
+    "relatedUserId": "user_002",
+    "level": 1,
+    "createdAt": {
+      "_seconds": 1739577600,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "txn_003",
+    "userId": "user_001",
+    "type": "WITHDRAWAL",
+    "amount": 2000,
+    "currency": "CASH",
+    "status": "COMPLETED",
+    "description": "Bank withdrawal",
+    "createdAt": {
+      "_seconds": 1743465600,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "txn_004",
+    "userId": "user_002",
+    "type": "MEMBERSHIP_FEE",
+    "amount": 1000,
+    "currency": "CASH",
+    "status": "COMPLETED",
+    "description": "Membership activation fee",
+    "createdAt": {
+      "_seconds": 1739577600,
+      "_nanoseconds": 0
+    }
+  }
+]

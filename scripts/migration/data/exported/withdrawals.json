@@ -1,0 +1,22 @@
+[
+  {
+    "_id": "wd_001",
+    "userId": "user_001",
+    "amount": 2000,
+    "method": "bank",
+    "status": "completed",
+    "requestedAt": {
+      "_seconds": 1743120000,
+      "_nanoseconds": 0
+    },
+    "processedAt": {
+      "_seconds": 1743465600,
+      "_nanoseconds": 0
+    },
+    "bankDetails": {
+      "bankName": "SBI",
+      "accountNumber": "1234567890",
+      "ifscCode": "SBIN0001234"
+    }
+  }
+]

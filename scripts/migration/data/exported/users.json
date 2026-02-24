@@ -1,0 +1,127 @@
+[
+  {
+    "_id": "user_001",
+    "_path": "users/user_001",
+    "_createTime": "2025-01-15T10:00:00Z",
+    "_updateTime": "2025-06-20T14:30:00Z",
+    "email": "rahul.sharma@example.com",
+    "name": "Rahul Sharma",
+    "phone": "+919876543210",
+    "photoURL": "https://example.com/photos/rahul.jpg",
+    "role": "user",
+    "state": "Maharashtra",
+    "city": "Mumbai",
+    "ownReferralCode": "RAHUL001",
+    "referralCode": null,
+    "referredBy": null,
+    "uplinePath": [],
+    "referralProcessed": false,
+    "membershipActive": true,
+    "membershipDate": {
+      "_seconds": 1738368000,
+      "_nanoseconds": 0
+    },
+    "isActive": true,
+    "isBanned": false,
+    "kycStatus": "verified",
+    "kycData": {
+      "fullName": "Rahul Sharma",
+      "dateOfBirth": "1990-05-15",
+      "address": "123 Main St",
+      "city": "Mumbai",
+      "state": "Maharashtra",
+      "pincode": "400001",
+      "idType": "Aadhaar",
+      "idNumber": "XXXX-XXXX-1234",
+      "bankName": "SBI",
+      "accountNumber": "1234567890",
+      "ifscCode": "SBIN0001234"
+    },
+    "kycSubmittedAt": {
+      "_seconds": 1737331200,
+      "_nanoseconds": 0
+    },
+    "kycVerifiedAt": {
+      "_seconds": 1737504000,
+      "_nanoseconds": 0
+    },
+    "savedAddresses": [
+      {
+        "fullName": "Rahul Sharma",
+        "phone": "+919876543210",
+        "addressLine1": "123 Main St",
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "pincode": "400001"
+      }
+    ],
+    "createdAt": {
+      "_seconds": 1736899200,
+      "_nanoseconds": 0
+    },
+    "updatedAt": {
+      "_seconds": 1750377600,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "user_002",
+    "_path": "users/user_002",
+    "_createTime": "2025-02-10T08:00:00Z",
+    "_updateTime": "2025-07-01T09:00:00Z",
+    "email": "priya.patel@example.com",
+    "name": "Priya Patel",
+    "phone": "+919998877665",
+    "role": "user",
+    "state": "Gujarat",
+    "city": "Ahmedabad",
+    "ownReferralCode": "PRIYA002",
+    "referralCode": "RAHUL001",
+    "referredBy": "user_001",
+    "uplinePath": [
+      "user_001"
+    ],
+    "referralProcessed": true,
+    "membershipActive": true,
+    "membershipDate": {
+      "_seconds": 1739577600,
+      "_nanoseconds": 0
+    },
+    "isActive": true,
+    "isBanned": false,
+    "kycStatus": "pending",
+    "createdAt": {
+      "_seconds": 1739145600,
+      "_nanoseconds": 0
+    },
+    "updatedAt": {
+      "_seconds": 1751328000,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "admin_001",
+    "_path": "users/admin_001",
+    "_createTime": "2025-01-01T00:00:00Z",
+    "_updateTime": "2025-08-01T12:00:00Z",
+    "email": "admin@thinkmart.com",
+    "name": "System Admin",
+    "role": "admin",
+    "state": "Karnataka",
+    "city": "Bengaluru",
+    "ownReferralCode": "ADMIN001",
+    "referralProcessed": false,
+    "membershipActive": false,
+    "isActive": true,
+    "isBanned": false,
+    "kycStatus": "not_submitted",
+    "createdAt": {
+      "_seconds": 1735689600,
+      "_nanoseconds": 0
+    },
+    "updatedAt": {
+      "_seconds": 1754006400,
+      "_nanoseconds": 0
+    }
+  }
+]

@@ -1,0 +1,187 @@
+{
+  "exportedAt": "2026-02-23T09:48:36.570Z",
+  "collections": [
+    {
+      "collection": "users",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:34.033Z",
+      "durationMs": 2520,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "wallets",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.553Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "transactions",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.554Z",
+      "durationMs": 2,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "products",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.556Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "orders",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.557Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "withdrawals",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.558Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "reviews",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.559Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "reviewStats",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.560Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "reviewHelpful",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.561Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "wishlists",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.562Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "tasks",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.563Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "userTaskCompletions",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.564Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "badges",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.565Z",
+      "durationMs": 0,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "userBadges",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.565Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "settings",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.566Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "categories",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.567Z",
+      "durationMs": 0,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "brands",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.567Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "banners",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.568Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "coupons",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.569Z",
+      "durationMs": 0,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    },
+    {
+      "collection": "featureFlags",
+      "documentCount": 0,
+      "exportedAt": "2026-02-23T09:48:36.569Z",
+      "durationMs": 1,
+      "errors": [
+        "Unable to detect a Project Id in the current environment. \nTo learn more about authentication and Google APIs, visit: \nhttps://cloud.google.com/docs/authentication/getting-started"
+      ]
+    }
+  ],
+  "totalDocuments": 0,
+  "totalErrors": 20
+}

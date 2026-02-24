@@ -1,0 +1,13 @@
+[
+  {
+    "id": "wd_001",
+    "user_id": "user_001",
+    "amount": 2000,
+    "method": "bank",
+    "status": "completed",
+    "requested_at": "2025-03-28T00:00:00.000Z",
+    "processed_at": "2025-04-01T00:00:00.000Z",
+    "bank_details": "{\"bankName\":\"SBI\",\"accountNumber\":\"1234567890\",\"ifscCode\":\"SBIN0001234\"}",
+    "rejection_reason": null
+  }
+]

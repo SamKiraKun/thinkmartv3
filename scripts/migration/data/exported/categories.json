@@ -1,0 +1,18 @@
+[
+  {
+    "_id": "cat_001",
+    "name": "Beverages",
+    "slug": "beverages",
+    "sortOrder": 1,
+    "isActive": true,
+    "_createTime": "2025-01-01T00:00:00Z"
+  },
+  {
+    "_id": "cat_002",
+    "name": "Clothing",
+    "slug": "clothing",
+    "sortOrder": 2,
+    "isActive": true,
+    "_createTime": "2025-01-01T00:00:00Z"
+  }
+]

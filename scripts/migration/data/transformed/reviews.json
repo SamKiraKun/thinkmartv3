@@ -1,0 +1,20 @@
+[
+  {
+    "id": "rev_001",
+    "product_id": "prod_001",
+    "user_id": "user_001",
+    "order_id": "order_001",
+    "rating": 5,
+    "title": "Excellent Tea!",
+    "content": "Best green tea I have ever tasted. Very fresh.",
+    "images": null,
+    "user_name": "Rahul Sharma",
+    "user_avatar": null,
+    "helpful": 3,
+    "verified": 1,
+    "status": "approved",
+    "moderation_note": null,
+    "created_at": "2025-04-20T00:00:00.000Z",
+    "updated_at": null
+  }
+]

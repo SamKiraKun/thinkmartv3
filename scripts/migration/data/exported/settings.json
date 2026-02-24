@@ -1,0 +1,9 @@
+[
+  {
+    "_id": "general",
+    "appName": "ThinkMart",
+    "maintenanceMode": false,
+    "membershipFee": 1000,
+    "minWithdrawalAmount": 500
+  }
+]

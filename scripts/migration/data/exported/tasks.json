@@ -1,0 +1,16 @@
+[
+  {
+    "_id": "task_001",
+    "title": "Daily Survey",
+    "description": "Complete a short survey about your shopping preferences.",
+    "type": "SURVEY",
+    "reward": 50,
+    "rewardType": "COIN",
+    "frequency": "DAILY",
+    "isActive": true,
+    "createdAt": {
+      "_seconds": 1735689600,
+      "_nanoseconds": 0
+    }
+  }
+]

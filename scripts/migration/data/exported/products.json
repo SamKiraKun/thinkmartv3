@@ -1,0 +1,49 @@
+[
+  {
+    "_id": "prod_001",
+    "name": "Organic Green Tea (100 bags)",
+    "description": "Premium organic green tea sourced from Darjeeling.",
+    "price": 499,
+    "category": "beverages",
+    "image": "https://cdn.thinkmart.com/products/prod_001/main.jpg",
+    "images": [
+      "https://cdn.thinkmart.com/products/prod_001/main.jpg",
+      "https://cdn.thinkmart.com/products/prod_001/side.jpg"
+    ],
+    "commission": 50,
+    "coinPrice": 200,
+    "inStock": true,
+    "stock": 150,
+    "deliveryDays": 5,
+    "vendor": "vendor_tea",
+    "createdAt": {
+      "_seconds": 1737331200,
+      "_nanoseconds": 0
+    },
+    "updatedAt": {
+      "_seconds": 1748736000,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "prod_002",
+    "name": "ThinkMart Branded T-Shirt",
+    "description": "Comfortable cotton t-shirt with ThinkMart logo.",
+    "price": 349,
+    "category": "clothing",
+    "image": "https://cdn.thinkmart.com/products/prod_002/main.jpg",
+    "commission": 35,
+    "coinOnly": true,
+    "coinPrice": 150,
+    "inStock": true,
+    "stock": 50,
+    "createdAt": {
+      "_seconds": 1741564800,
+      "_nanoseconds": 0
+    },
+    "updatedAt": {
+      "_seconds": 1747267200,
+      "_nanoseconds": 0
+    }
+  }
+]

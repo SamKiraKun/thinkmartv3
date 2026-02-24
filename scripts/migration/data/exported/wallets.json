@@ -1,0 +1,35 @@
+[
+  {
+    "_id": "user_001",
+    "coinBalance": 1250.5,
+    "cashBalance": 4500.75,
+    "totalEarnings": 12000,
+    "totalWithdrawals": 7500,
+    "updatedAt": {
+      "_seconds": 1750377600,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "user_002",
+    "coinBalance": 340,
+    "cashBalance": 1200,
+    "totalEarnings": 2500,
+    "totalWithdrawals": 1300,
+    "updatedAt": {
+      "_seconds": 1751328000,
+      "_nanoseconds": 0
+    }
+  },
+  {
+    "_id": "admin_001",
+    "coinBalance": 0,
+    "cashBalance": 0,
+    "totalEarnings": 0,
+    "totalWithdrawals": 0,
+    "updatedAt": {
+      "_seconds": 1754006400,
+      "_nanoseconds": 0
+    }
+  }
+]
