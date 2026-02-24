@@ -41,6 +41,8 @@
     "node_modules",
     "server",
     "functions",
-    "_cleanpush"
+    "_cleanpush",
+    "scripts",
+    "tests"
   ]
 }
