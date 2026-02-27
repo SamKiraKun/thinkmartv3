@@ -13,6 +13,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../utils/errors.js';
 import { runIdempotentMutation } from '../../utils/idempotency.js';
 import { enqueueWalletCreditNotification } from '../../jobs/enqueue.js';
+import { broadcast } from '../realtime/index.js';
 
 const ALLOWED_TRANSACTION_TYPES = new Set([
     'TASK_REWARD',
@@ -65,6 +66,14 @@ export default async function walletWriteRoutes(fastify: FastifyInstance) {
                 request,
                 reply,
                 userId,
+                afterCommit: async (result) => {
+                    if (result.cached) return;
+                    broadcast(`user:${userId}`, 'wallet.updated', {
+                        reason: 'coin_conversion',
+                        coinsConverted: coins,
+                        convertedAmount,
+                    });
+                },
                 handler: async (tx) => {
                     const walletUpdate = await tx.execute({
                         sql: `UPDATE wallets
@@ -182,6 +191,12 @@ export default async function walletWriteRoutes(fastify: FastifyInstance) {
                     if (result.cached) return;
                     await enqueueWalletCreditNotification({
                         userId: body.userId,
+                        amount: body.amount,
+                        currency: body.currency,
+                        transactionId,
+                    });
+                    broadcast(`user:${body.userId}`, 'wallet.updated', {
+                        reason: 'admin_credit',
                         amount: body.amount,
                         currency: body.currency,
                         transactionId,

@@ -15,7 +15,7 @@ import { randomUUID } from 'crypto';
 import { getDb, withTransaction } from '../../db/client.js';
 import { paginatedResponse } from '../../utils/pagination.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
-import { BadRequestError, NotFoundError } from '../../utils/errors.js';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../utils/errors.js';
 import { runIdempotentMutation } from '../../utils/idempotency.js';
 
 export default async function adminRoutes(fastify: FastifyInstance) {
@@ -169,6 +169,41 @@ export default async function adminRoutes(fastify: FastifyInstance) {
         return 'active';
     };
 
+    const isPrivilegedRole = (role: unknown): boolean =>
+        ['admin', 'sub_admin'].includes(String(role || ''));
+
+    const assertActorCanMutateUser = ({
+        actorId,
+        actorRole,
+        targetId,
+        targetRole,
+        requestedRole,
+        action,
+    }: {
+        actorId: string;
+        actorRole: string;
+        targetId: string;
+        targetRole: string;
+        requestedRole?: string;
+        action: string;
+    }) => {
+        if (action === 'role_update' && actorId === targetId) {
+            throw new BadRequestError('You cannot change your own role');
+        }
+        if (action === 'status_ban' && actorId === targetId) {
+            throw new BadRequestError('You cannot ban your own account');
+        }
+
+        if (actorRole === 'sub_admin') {
+            if (isPrivilegedRole(targetRole)) {
+                throw new ForbiddenError('Sub-admin cannot modify admin or sub-admin accounts');
+            }
+            if (requestedRole && isPrivilegedRole(requestedRole)) {
+                throw new ForbiddenError('Sub-admin cannot assign admin or sub-admin roles');
+            }
+        }
+    };
+
     // ─── Platform Stats ───────────────────────────────────────────
     fastify.get('/api/admin/stats', async (request, reply) => {
         const db = getDb();
@@ -320,6 +355,7 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     fastify.patch('/api/admin/users/:id/status', async (request, reply) => {
         const db = getDb();
         const adminId = request.user!.uid;
+        const actorRole = request.user!.role;
         const { id } = request.params as { id: string };
         const body = request.body as { status?: 'active' | 'banned'; reason?: string };
 
@@ -332,12 +368,20 @@ export default async function adminRoutes(fastify: FastifyInstance) {
 
         const now = new Date().toISOString();
         const userResult = await db.execute({
-            sql: 'SELECT uid, is_banned FROM users WHERE uid = ?',
+            sql: 'SELECT uid, role, is_banned FROM users WHERE uid = ?',
             args: [id],
         });
         if (userResult.rows.length === 0) {
             throw new NotFoundError('User not found');
         }
+        const targetRole = String(userResult.rows[0].role || '');
+        assertActorCanMutateUser({
+            actorId: adminId,
+            actorRole,
+            targetId: id,
+            targetRole,
+            action: body.status === 'banned' ? 'status_ban' : 'status_unban',
+        });
 
         await db.execute({
             sql: `UPDATE users
@@ -369,6 +413,7 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     fastify.patch('/api/admin/users/:id/role', async (request, reply) => {
         const db = getDb();
         const adminId = request.user!.uid;
+        const actorRole = request.user!.role;
         const { id } = request.params as { id: string };
         const body = request.body as { role?: string };
         const allowedRoles = ['user', 'admin', 'sub_admin', 'vendor', 'partner', 'organization'];
@@ -385,6 +430,16 @@ export default async function adminRoutes(fastify: FastifyInstance) {
         if (existing.rows.length === 0) {
             throw new NotFoundError('User not found');
         }
+        const fromRole = String(existing.rows[0].role || '');
+        const toRole = String(body.role || '');
+        assertActorCanMutateUser({
+            actorId: adminId,
+            actorRole,
+            targetId: id,
+            targetRole: fromRole,
+            requestedRole: toRole,
+            action: 'role_update',
+        });
 
         await db.execute({
             sql: `UPDATE users
@@ -403,7 +458,7 @@ export default async function adminRoutes(fastify: FastifyInstance) {
                 'user.role_update',
                 'user',
                 id,
-                JSON.stringify({ fromRole: existing.rows[0].role, toRole: body.role }),
+                JSON.stringify({ fromRole, toRole }),
                 request.ip,
                 now,
             ],
@@ -658,6 +713,7 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     // ─── Wallet Adjustment (Admin) ─────────────────────────────────────────
     fastify.post('/api/admin/users/:id/wallet-adjust', async (request, reply) => {
         const adminId = request.user!.uid;
+        const actorRole = request.user!.role;
         const { id } = request.params as { id: string };
         const body = request.body as {
             deltaAmount?: number;
@@ -689,12 +745,20 @@ export default async function adminRoutes(fastify: FastifyInstance) {
             userId: adminId,
             handler: async (tx) => {
                 const target = await tx.execute({
-                    sql: 'SELECT uid FROM users WHERE uid = ?',
+                    sql: 'SELECT uid, role FROM users WHERE uid = ?',
                     args: [id],
                 });
                 if (target.rows.length === 0) {
                     throw new NotFoundError('User not found');
                 }
+                const targetRole = String(target.rows[0].role || '');
+                assertActorCanMutateUser({
+                    actorId: adminId,
+                    actorRole,
+                    targetId: id,
+                    targetRole,
+                    action: 'wallet_adjust',
+                });
 
                 await tx.execute({
                     sql: `INSERT INTO wallets (user_id, coin_balance, cash_balance, updated_at)

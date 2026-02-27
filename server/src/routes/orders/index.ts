@@ -12,13 +12,102 @@ import { getDb } from '../../db/client.js';
 import { paginatedResponse } from '../../utils/pagination.js';
 import { requireAuth } from '../../middleware/auth.js';
 
-function formatOrder(row: Record<string, any>) {
+function parseItems(raw: unknown): Array<Record<string, any>> {
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(String(raw));
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map((value) =>
+            value && typeof value === 'object' ? (value as Record<string, any>) : {}
+        );
+    } catch {
+        return [];
+    }
+}
+
+function parseImages(raw: unknown): string[] {
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(String(raw));
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map((value) => String(value || '').trim()).filter(Boolean);
+    } catch {
+        return [];
+    }
+}
+
+async function buildProductLookup(
+    rows: Array<Record<string, any>>
+): Promise<Map<string, Record<string, any>>> {
+    const ids = new Set<string>();
+    for (const row of rows) {
+        for (const item of parseItems(row.items)) {
+            const productId = String(item.productId || item.id || '').trim();
+            if (productId.length > 0) ids.add(productId);
+        }
+    }
+
+    if (ids.size === 0) return new Map<string, Record<string, any>>();
+
+    const db = getDb();
+    const idList = Array.from(ids);
+    const placeholders = idList.map(() => '?').join(', ');
+    const result = await db.execute({
+        sql: `SELECT id, name, image, images, price, coin_price
+              FROM products
+              WHERE id IN (${placeholders})`,
+        args: idList,
+    });
+
+    const lookup = new Map<string, Record<string, any>>();
+    for (const row of result.rows as Array<Record<string, any>>) {
+        lookup.set(String(row.id), row);
+    }
+    return lookup;
+}
+
+function enrichItems(
+    row: Record<string, any>,
+    productLookup: Map<string, Record<string, any>>
+): Array<Record<string, any>> {
+    return parseItems(row.items).map((item) => {
+        const productId = String(item.productId || item.id || '').trim();
+        const product = productLookup.get(productId);
+        const images = parseImages(product?.images);
+        const image = String(product?.image || images[0] || item.image || '').trim();
+        const basePrice = Number(product?.price || 0);
+        const baseCoinPrice = Number(product?.coin_price || 0);
+
+        return {
+            ...item,
+            productId,
+            name: String(item.name || item.productName || product?.name || 'Product'),
+            price: Number(item.price ?? basePrice),
+            coinPrice: Number(item.coinPrice ?? item.coin_price ?? baseCoinPrice),
+            product: product
+                ? {
+                    id: String(product.id),
+                    name: String(product.name || 'Product'),
+                    image,
+                    imageUrl: image,
+                    price: basePrice,
+                    coinPrice: baseCoinPrice,
+                }
+                : null,
+        };
+    });
+}
+
+function formatOrder(
+    row: Record<string, any>,
+    productLookup: Map<string, Record<string, any>>
+) {
     return {
         id: row.id,
         userId: row.user_id,
         userEmail: row.user_email,
         userName: row.user_name,
-        items: row.items ? JSON.parse(row.items as string) : [],
+        items: enrichItems(row, productLookup),
         subtotal: row.subtotal,
         cashPaid: row.cash_paid,
         coinsRedeemed: row.coins_redeemed,
@@ -70,7 +159,14 @@ export default async function orderRoutes(fastify: FastifyInstance) {
             args: [...params, limit, offset],
         });
 
-        return paginatedResponse(result.rows.map(formatOrder), total, page, limit);
+        const orderRows = result.rows as Array<Record<string, any>>;
+        const productLookup = await buildProductLookup(orderRows);
+        return paginatedResponse(
+            orderRows.map((row) => formatOrder(row, productLookup)),
+            total,
+            page,
+            limit
+        );
     });
 
     // ─── Single Order Detail ──────────────────────────────────────
@@ -105,7 +201,9 @@ export default async function orderRoutes(fastify: FastifyInstance) {
             });
         }
 
-        return { data: formatOrder(order) };
+        const orderRow = order as Record<string, any>;
+        const productLookup = await buildProductLookup([orderRow]);
+        return { data: formatOrder(orderRow, productLookup) };
     });
 
     // ─── Vendor's Received Orders ─────────────────────────────────
@@ -155,6 +253,13 @@ export default async function orderRoutes(fastify: FastifyInstance) {
             args: [...params, limit, offset],
         });
 
-        return paginatedResponse(result.rows.map(formatOrder), total, page, limit);
+        const orderRows = result.rows as Array<Record<string, any>>;
+        const productLookup = await buildProductLookup(orderRows);
+        return paginatedResponse(
+            orderRows.map((row) => formatOrder(row, productLookup)),
+            total,
+            page,
+            limit
+        );
     });
 }

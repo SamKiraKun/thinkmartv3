@@ -3,6 +3,7 @@
  * Withdrawal Write Routes (Wave 2 - Financial Writes)
  *
  * POST   /api/withdrawals                  - Create a withdrawal request
+ * PATCH  /api/withdrawals/:id/cancel       - Cancel own pending withdrawal
  * PATCH  /api/admin/withdrawals/:id/status - Update withdrawal status (Admin)
  */
 
@@ -13,6 +14,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../utils/errors.js';
 import { runIdempotentMutation } from '../../utils/idempotency.js';
 import { enqueueWithdrawalNotification } from '../../jobs/enqueue.js';
+import { broadcast } from '../realtime/index.js';
 
 type WithdrawalMethod = 'bank' | 'wallet' | 'upi';
 type WithdrawalAdminStatus = 'completed' | 'rejected';
@@ -102,6 +104,15 @@ export default async function withdrawalWriteRoutes(fastify: FastifyInstance) {
                         status: 'pending',
                         amount: body.amount,
                     });
+                    broadcast(`user:${userId}`, 'withdrawal.created', {
+                        withdrawalId: id,
+                        status: 'pending',
+                        amount: body.amount,
+                    });
+                    broadcast(`user:${userId}`, 'wallet.updated', {
+                        reason: 'withdrawal_requested',
+                        withdrawalId: id,
+                    });
                 },
                 handler: async (tx) => {
                     const walletUpdate = await tx.execute({
@@ -175,6 +186,98 @@ export default async function withdrawalWriteRoutes(fastify: FastifyInstance) {
                     };
                 },
             });
+        }
+    );
+
+    fastify.patch(
+        '/api/withdrawals/:id/cancel',
+        { preHandler: [requireAuth] },
+        async (request, reply) => {
+            const userId = request.user!.uid;
+            const { id } = request.params as { id: string };
+            const now = new Date().toISOString();
+
+            const result = await withTransaction(async (tx) => {
+                const existing = await tx.execute({
+                    sql: 'SELECT id, user_id, amount, status FROM withdrawals WHERE id = ?',
+                    args: [id],
+                });
+
+                if (existing.rows.length === 0) {
+                    throw new NotFoundError('Withdrawal not found');
+                }
+
+                const withdrawal = existing.rows[0] as Record<string, any>;
+                if (String(withdrawal.user_id || '') !== userId) {
+                    throw new ForbiddenError('You can only cancel your own withdrawal');
+                }
+                if (String(withdrawal.status || '') !== 'pending') {
+                    throw new BadRequestError('Only pending withdrawals can be cancelled');
+                }
+
+                const amount = Number(withdrawal.amount || 0);
+                if (!Number.isFinite(amount) || amount <= 0) {
+                    throw new BadRequestError('Invalid withdrawal amount');
+                }
+
+                await tx.execute({
+                    sql: `UPDATE withdrawals
+                          SET status = ?, rejection_reason = ?, admin_notes = ?, processed_at = ?, processed_by = ?
+                          WHERE id = ?`,
+                    args: ['rejected', 'Cancelled by user', 'Cancelled by user', now, userId, id],
+                });
+
+                await tx.execute({
+                    sql: `UPDATE wallets
+                          SET cash_balance = cash_balance + ?, updated_at = ?
+                          WHERE user_id = ?`,
+                    args: [amount, now, userId],
+                });
+
+                await tx.execute({
+                    sql: `UPDATE transactions
+                          SET status = ?, description = ?
+                          WHERE source_txn_id = ? AND type = 'WITHDRAWAL'`,
+                    args: ['FAILED', 'Withdrawal cancelled by user', id],
+                });
+
+                await tx.execute({
+                    sql: `INSERT INTO audit_logs (
+                            id, actor_uid, action, target_type, target_id, details, ip_address, created_at
+                          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    args: [
+                        randomUUID(),
+                        userId,
+                        'withdrawal.cancel',
+                        'withdrawal',
+                        id,
+                        JSON.stringify({ amount, userId }),
+                        request.ip,
+                        now,
+                    ],
+                });
+
+                return { amount };
+            });
+
+            await enqueueWithdrawalNotification({
+                withdrawalId: id,
+                userId,
+                status: 'rejected',
+                amount: result.amount,
+            });
+            broadcast(`user:${userId}`, 'withdrawal.updated', {
+                withdrawalId: id,
+                status: 'rejected',
+                amount: result.amount,
+            });
+            broadcast(`user:${userId}`, 'wallet.updated', {
+                reason: 'withdrawal_cancelled',
+                withdrawalId: id,
+                status: 'rejected',
+            });
+
+            return reply.send({ data: { updated: true, status: 'rejected' } });
         }
     );
 
@@ -307,6 +410,16 @@ export default async function withdrawalWriteRoutes(fastify: FastifyInstance) {
                 userId: data.userId,
                 status: data.status as 'completed' | 'rejected',
                 amount: data.amount,
+            });
+            broadcast(`user:${data.userId}`, 'withdrawal.updated', {
+                withdrawalId: id,
+                status: data.status,
+                amount: data.amount,
+            });
+            broadcast(`user:${data.userId}`, 'wallet.updated', {
+                reason: 'withdrawal_status_change',
+                withdrawalId: id,
+                status: data.status,
             });
 
             return reply.send({ data: { updated: true, status: data.status } });

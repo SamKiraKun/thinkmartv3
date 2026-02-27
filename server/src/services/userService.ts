@@ -78,6 +78,33 @@ export async function registerUser(
     // Generate unique referral code
     const ownReferralCode = nanoid(8).toUpperCase();
     const now = new Date().toISOString();
+    const role = input.accountType ?? 'user';
+    const vendorConfig =
+        role === 'vendor'
+            ? JSON.stringify({
+                businessName: input.businessName?.trim() || '',
+                businessCategory: input.businessCategory || null,
+                gstNumber: input.gstNumber?.trim() || null,
+                businessAddress: input.businessAddress?.trim() || null,
+                vendorId: uid,
+                verified: false,
+                productCount: 0,
+                totalSales: 0,
+                createdAt: now,
+            })
+            : null;
+    const orgConfig =
+        role === 'organization'
+            ? JSON.stringify({
+                orgName: input.orgName?.trim() || '',
+                orgType: input.orgType || null,
+                registrationNumber: input.orgRegistrationNumber?.trim() || null,
+                verified: false,
+                memberCount: 0,
+                totalEarnings: 0,
+                createdAt: now,
+            })
+            : null;
 
     // Create user and wallet in a transaction
     const batch = [
@@ -85,13 +112,15 @@ export async function registerUser(
             sql: `INSERT INTO users (
         uid, email, name, phone, role, state, city,
         own_referral_code, referral_code, referral_processed,
-        membership_active, is_active, is_banned, kyc_status,
+        membership_active, is_active, is_banned, kyc_status, vendor_config, org_config,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'user', ?, ?, ?, ?, 0, 0, 1, 0, 'not_submitted', ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, 0, 'not_submitted', ?, ?, ?, ?)`,
             args: [
                 uid, email, input.name, input.phone || null,
+                role,
                 input.state || null, input.city || null,
                 ownReferralCode, input.referralCode || null,
+                vendorConfig, orgConfig,
                 now, now,
             ],
         },

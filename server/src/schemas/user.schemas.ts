@@ -14,12 +14,76 @@ export const userRoleSchema = z.enum([
     'organization',
 ]);
 
+export const registrationAccountTypeSchema = z.enum([
+    'user',
+    'vendor',
+    'organization',
+]);
+
+const organizationTypeSchema = z.enum([
+    'school',
+    'college',
+    'ngo',
+    'company',
+    'other',
+]);
+
+const businessCategorySchema = z.enum([
+    'electronics',
+    'fashion',
+    'home',
+    'food',
+    'health',
+    'other',
+]);
+
 export const registerUserSchema = z.object({
+    accountType: registrationAccountTypeSchema.default('user'),
     name: z.string().min(2).max(100).trim(),
     phone: z.string().optional(),
     state: z.string().min(1).max(100).optional(),
     city: z.string().min(1).max(100).optional(),
     referralCode: z.string().max(20).optional(),
+    orgName: z.string().max(200).trim().optional(),
+    orgType: organizationTypeSchema.optional(),
+    orgRegistrationNumber: z.string().max(100).trim().optional(),
+    businessName: z.string().max(200).trim().optional(),
+    businessCategory: businessCategorySchema.optional(),
+    gstNumber: z.string().max(100).trim().optional(),
+    businessAddress: z.string().max(300).trim().optional(),
+}).superRefine((value, ctx) => {
+    if (value.accountType === 'organization') {
+        if (!value.orgName || value.orgName.trim().length === 0) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['orgName'],
+                message: 'Organization name is required for organization accounts',
+            });
+        }
+        if (!value.orgType) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['orgType'],
+                message: 'Organization type is required for organization accounts',
+            });
+        }
+    }
+    if (value.accountType === 'vendor') {
+        if (!value.businessName || value.businessName.trim().length === 0) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['businessName'],
+                message: 'Business name is required for vendor accounts',
+            });
+        }
+        if (!value.businessCategory) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['businessCategory'],
+                message: 'Business category is required for vendor accounts',
+            });
+        }
+    }
 });
 
 export const updateProfileSchema = z.object({

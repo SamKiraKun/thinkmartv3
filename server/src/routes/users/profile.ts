@@ -152,4 +152,63 @@ export default async function profileWriteRoutes(fastify: FastifyInstance) {
 
         return { data: { kycStatus: 'pending' } };
     });
+
+    // ─── PUT alias for KYC (Flutter sends PUT) ────────────────────
+    fastify.put('/api/users/me/kyc', { preHandler: [requireAuth] }, async (request, reply) => {
+        // Delegate to the POST handler logic by re-routing the body
+        const db = getDb();
+        const userId = request.user!.uid;
+
+        const body = request.body as {
+            fullName: string;
+            dateOfBirth: string;
+            address: string;
+            city: string;
+            state: string;
+            pincode: string;
+            idType: string;
+            idNumber: string;
+            bankName: string;
+            accountNumber: string;
+            ifscCode: string;
+            idDocumentUrl?: string;
+            addressProofUrl?: string;
+        };
+
+        const current = await db.execute({
+            sql: 'SELECT kyc_status FROM users WHERE uid = ?',
+            args: [userId],
+        });
+
+        if (!current.rows[0]) {
+            return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+        }
+
+        if (current.rows[0].kyc_status === 'verified') {
+            return reply.status(409).send({ error: { code: 'ALREADY_VERIFIED', message: 'KYC is already verified' } });
+        }
+
+        const kycData = JSON.stringify({
+            fullName: (body.fullName || '').trim(),
+            dateOfBirth: body.dateOfBirth,
+            address: (body.address || '').trim(),
+            city: (body.city || '').trim(),
+            state: (body.state || '').trim(),
+            pincode: (body.pincode || '').trim(),
+            idType: body.idType,
+            idNumber: (body.idNumber || '').trim(),
+            bankName: (body.bankName || '').trim(),
+            accountNumber: (body.accountNumber || '').trim(),
+            ifscCode: (body.ifscCode || '').trim().toUpperCase(),
+            idDocumentUrl: body.idDocumentUrl?.trim() || null,
+            addressProofUrl: body.addressProofUrl?.trim() || null,
+        });
+
+        await db.execute({
+            sql: `UPDATE users SET kyc_status = 'pending', kyc_data = ?, updated_at = ? WHERE uid = ?`,
+            args: [kycData, new Date().toISOString(), userId],
+        });
+
+        return { data: { kycStatus: 'pending' } };
+    });
 }

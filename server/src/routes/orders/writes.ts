@@ -13,6 +13,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../utils/errors.js';
 import { runIdempotentMutation } from '../../utils/idempotency.js';
 import { enqueueOrderCreatedJobs } from '../../jobs/enqueue.js';
+import { broadcast } from '../realtime/index.js';
 
 const ALLOWED_ORDER_STATUSES = new Set([
     'pending',
@@ -103,6 +104,22 @@ export default async function orderWriteRoutes(fastify: FastifyInstance) {
                         userId,
                         itemsCount: body.items.length,
                     });
+                    broadcast(`user:${userId}`, 'order.created', {
+                        orderId,
+                        status: 'pending',
+                        createdAt: now,
+                    });
+                    broadcast(`order:${orderId}`, 'order.created', {
+                        orderId,
+                        status: 'pending',
+                        createdAt: now,
+                    });
+                    if (body.coinsRedeemed > 0) {
+                        broadcast(`user:${userId}`, 'wallet.updated', {
+                            reason: 'order_created_coin_debit',
+                            orderId,
+                        });
+                    }
                 },
                 handler: async (tx) => {
                     const userResult = await tx.execute({
@@ -266,7 +283,7 @@ export default async function orderWriteRoutes(fastify: FastifyInstance) {
 
             const data = await withTransaction(async (tx) => {
                 const orderResult = await tx.execute({
-                    sql: 'SELECT status, status_history FROM orders WHERE id = ?',
+                    sql: 'SELECT user_id, status, status_history FROM orders WHERE id = ?',
                     args: [id],
                 });
 
@@ -326,7 +343,20 @@ export default async function orderWriteRoutes(fastify: FastifyInstance) {
                     ],
                 });
 
-                return { updated: true, status: body.status };
+                return {
+                    updated: true,
+                    status: body.status,
+                    userId: String(existingRow.user_id),
+                };
+            });
+
+            broadcast(`order:${id}`, 'order.updated', {
+                orderId: id,
+                status: data.status,
+            });
+            broadcast(`user:${data.userId}`, 'order.updated', {
+                orderId: id,
+                status: data.status,
             });
 
             return reply.send({ data });
@@ -346,6 +376,28 @@ export default async function orderWriteRoutes(fastify: FastifyInstance) {
                 request,
                 reply,
                 userId,
+                afterCommit: async (result) => {
+                    if (result.cached) return;
+                    const payload = result.payload as {
+                        data?: { id?: string; userId?: string; status?: string };
+                    };
+                    const cancelledOrderId = payload.data?.id;
+                    const cancelledUserId = payload.data?.userId;
+                    if (!cancelledOrderId || !cancelledUserId) return;
+
+                    broadcast(`order:${cancelledOrderId}`, 'order.cancelled', {
+                        orderId: cancelledOrderId,
+                        status: payload.data?.status ?? 'cancelled',
+                    });
+                    broadcast(`user:${cancelledUserId}`, 'order.cancelled', {
+                        orderId: cancelledOrderId,
+                        status: payload.data?.status ?? 'cancelled',
+                    });
+                    broadcast(`user:${cancelledUserId}`, 'wallet.updated', {
+                        reason: 'order_cancel_refund',
+                        orderId: cancelledOrderId,
+                    });
+                },
                 handler: async (tx) => {
                     const orderResult = await tx.execute({
                         sql: `SELECT id, user_id, status, status_history, cash_paid, coins_redeemed
@@ -465,6 +517,7 @@ export default async function orderWriteRoutes(fastify: FastifyInstance) {
                         payload: {
                             data: {
                                 id,
+                                userId,
                                 status: 'cancelled',
                                 refundedCash: cashRefund,
                                 refundedCoins: coinRefund,

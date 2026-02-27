@@ -45,6 +45,7 @@ import withdrawalWriteRoutes from './routes/withdrawals/writes.js';
 import storageRoutes from './routes/storage/index.js';
 import membershipWriteRoutes from './routes/membership/writes.js';
 import referralWriteRoutes from './routes/referrals/writes.js';
+import notificationRoutes from './routes/notifications/index.js';
 import { AppError } from './utils/errors.js';
 import type { FastifyError } from 'fastify';
 
@@ -207,6 +208,7 @@ export async function buildApp() {
     await app.register(referralWriteRoutes);
     await app.register(storageRoutes);
     await app.register(realtimeRoutes);
+    await app.register(notificationRoutes);
 
     // Root route
     app.get('/', async () => ({
