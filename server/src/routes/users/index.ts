@@ -5,7 +5,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { requireAuth } from '../../middleware/auth.js';
+import { requireAuth, verifyFirebaseToken } from '../../middleware/auth.js';
 import { validateBody } from '../../middleware/validate.js';
 import { registerUserSchema, updateProfileSchema } from '../../schemas/user.schemas.js';
 import * as userService from '../../services/userService.js';
@@ -49,13 +49,13 @@ export async function userRoutes(app: FastifyInstance) {
                         });
                     }
 
-                    const { getAuth } = await import('firebase-admin/auth');
                     try {
                         const token = authHeader.slice(7);
-                        const decoded = await getAuth().verifyIdToken(token, true);
+                        const decoded = await verifyFirebaseToken(token);
                         // Attach minimal user info for registration
                         (request as any)._firebaseUid = decoded.uid;
-                        (request as any)._firebaseEmail = decoded.email || '';
+                        (request as any)._firebaseEmail =
+                            decoded.email || `${decoded.uid}@firebase.local`;
                     } catch {
                         return reply.status(401).send({
                             error: { code: 'UNAUTHORIZED', message: 'Invalid token' },
@@ -69,6 +69,12 @@ export async function userRoutes(app: FastifyInstance) {
             const uid = (request as any)._firebaseUid as string;
             const email = (request as any)._firebaseEmail as string;
             const body = request.body as any;
+
+            const existing = await userService.getUserById(uid);
+            if (existing) {
+                // Idempotent success path for retries/race conditions.
+                return reply.send({ data: existing });
+            }
 
             const user = await userService.registerUser(uid, email, body);
 

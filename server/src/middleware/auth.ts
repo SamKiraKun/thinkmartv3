@@ -66,9 +66,12 @@ declare module 'fastify' {
 
 // ─── Token Verification ─────────────────────────────────────────────
 
-export async function verifyFirebaseToken(token: string): Promise<DecodedIdToken> {
+export async function verifyFirebaseToken(
+    token: string,
+    checkRevoked = false
+): Promise<DecodedIdToken> {
     try {
-        return await getAuth().verifyIdToken(token, true);
+        return await getAuth().verifyIdToken(token, checkRevoked);
     } catch (err) {
         logger.debug({ err }, 'Firebase token verification failed');
         throw new UnauthorizedError('Invalid or expired token');
