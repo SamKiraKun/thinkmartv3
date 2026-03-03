@@ -21,6 +21,81 @@ type SqlExecutor = {
 };
 
 type TaskRow = Record<string, any>;
+type TaskIntegrity = {
+    activeSeconds: number;
+    backgroundSeconds: number;
+    contentOpened: boolean;
+    answerCount?: number;
+    questionCount?: number;
+    client?: string;
+};
+
+function parseNonNegativeInt(value: unknown): number | null {
+    if (value == null) return null;
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value) || value < 0) {
+            throw new BadRequestError('integrity fields must be non-negative numbers');
+        }
+        return Math.floor(value);
+    }
+    if (typeof value === 'string' && value.trim().length > 0) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+            throw new BadRequestError('integrity fields must be non-negative numbers');
+        }
+        return Math.floor(parsed);
+    }
+    throw new BadRequestError('integrity fields must be non-negative numbers');
+}
+
+function parseBoolean(value: unknown, fallback = false): boolean {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+    }
+    return fallback;
+}
+
+function normalizeIntegrity(raw: unknown): TaskIntegrity | undefined {
+    if (raw == null) return undefined;
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new BadRequestError('integrity must be an object');
+    }
+
+    const input = raw as Record<string, unknown>;
+    const activeSeconds = parseNonNegativeInt(input.activeSeconds) ?? 0;
+    const backgroundSeconds = parseNonNegativeInt(input.backgroundSeconds) ?? 0;
+    const answerCount = parseNonNegativeInt(input.answerCount);
+    const questionCount = parseNonNegativeInt(input.questionCount);
+    const client = typeof input.client === 'string' ? input.client.trim().slice(0, 64) : undefined;
+
+    return {
+        activeSeconds,
+        backgroundSeconds,
+        contentOpened: parseBoolean(input.contentOpened, false),
+        ...(answerCount != null ? { answerCount } : {}),
+        ...(questionCount != null ? { questionCount } : {}),
+        ...(client ? { client } : {}),
+    };
+}
+
+function getSurveyQuestionCount(task: TaskRow): number {
+    const raw = task.questions;
+    if (Array.isArray(raw)) {
+        return raw.length;
+    }
+    if (typeof raw === 'string') {
+        try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed.length : 0;
+        } catch {
+            return 0;
+        }
+    }
+    return 0;
+}
 
 async function ensureTaskSessionTable(executor: SqlExecutor) {
     await executor.execute({
@@ -89,8 +164,9 @@ async function validateAndFinalizeSession(params: {
     sessionId?: string;
     nextStatus: string;
     answers?: Record<string, unknown>;
+    integrity?: TaskIntegrity;
 }) {
-    const { tx, userId, task, taskId, sessionId, nextStatus, answers } = params;
+    const { tx, userId, task, taskId, sessionId, nextStatus, answers, integrity } = params;
     const taskType = String(task.type || '').toUpperCase();
     const requiresSession = SESSION_REQUIRED_TYPES.has(taskType);
     if (requiresSession && (!sessionId || !sessionId.trim())) {
@@ -132,6 +208,39 @@ async function validateAndFinalizeSession(params: {
         }
     }
 
+    if (integrity) {
+        if (minDuration > 0 && integrity.activeSeconds + 1 < minDuration) {
+            throw new ConflictError(`Task requires at least ${minDuration}s of active time`);
+        }
+
+        if (taskType === 'VIDEO' || taskType === 'WATCH_VIDEO') {
+            if (!integrity.contentOpened) {
+                throw new ConflictError('Open video content before claiming reward');
+            }
+            if (integrity.backgroundSeconds > 120) {
+                throw new ConflictError('Task invalidated due to long background time');
+            }
+        }
+
+        if (taskType === 'SURVEY') {
+            if (integrity.backgroundSeconds > 180) {
+                throw new ConflictError('Task invalidated due to long background time');
+            }
+            const requiredQuestions = getSurveyQuestionCount(task);
+            const answerCount =
+                integrity.answerCount ??
+                (answers ? Object.keys(answers).filter((key) => answers[key] != null).length : 0);
+            if (requiredQuestions > 0 && answerCount < requiredQuestions) {
+                throw new BadRequestError('Please answer all survey questions before submission');
+            }
+        }
+    }
+
+    const payloadObject: Record<string, unknown> = {};
+    if (answers) payloadObject.answers = answers;
+    if (integrity) payloadObject.integrity = integrity;
+    const payload = Object.keys(payloadObject).length > 0 ? JSON.stringify(payloadObject) : null;
+
     await tx.execute({
         sql: `UPDATE task_sessions
               SET status = ?, completed_at = ?, payload = COALESCE(?, payload)
@@ -139,7 +248,7 @@ async function validateAndFinalizeSession(params: {
         args: [
             nextStatus,
             new Date().toISOString(),
-            answers ? JSON.stringify(answers) : null,
+            payload,
             sessionId,
             userId,
         ],
@@ -214,9 +323,10 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
         sessionId?: string;
         nextSessionStatus: string;
         answers?: Record<string, unknown>;
+        integrity?: TaskIntegrity;
         onlySurvey?: boolean;
     }) => {
-        const { userId, taskId, sessionId, nextSessionStatus, answers, onlySurvey } = params;
+        const { userId, taskId, sessionId, nextSessionStatus, answers, integrity, onlySurvey } = params;
         return withTransaction(async (tx) => {
             const task = await loadActiveTask(tx as unknown as SqlExecutor, taskId);
             const taskType = String(task.type || '').toUpperCase();
@@ -242,6 +352,7 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
                 sessionId,
                 nextStatus: nextSessionStatus,
                 answers,
+                integrity,
             });
 
             return rewardTaskCompletion({
@@ -256,11 +367,12 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
     fastify.post('/api/tasks/:id/complete', { preHandler: [requireAuth] }, async (request, reply) => {
         const userId = request.user!.uid;
         const { id: taskId } = request.params as { id: string };
-        const body = request.body as { sessionId?: string };
+        const body = request.body as { sessionId?: string; integrity?: unknown };
         const data = await completeTaskAndReward({
             userId,
             taskId,
             sessionId: body?.sessionId,
+            integrity: normalizeIntegrity(body?.integrity),
             nextSessionStatus: 'completed',
         });
 
@@ -324,11 +436,12 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
     fastify.post('/api/tasks/:id/reward', { preHandler: [requireAuth] }, async (request, reply) => {
         const userId = request.user!.uid;
         const { id: taskId } = request.params as { id: string };
-        const body = request.body as { sessionId?: string };
+        const body = request.body as { sessionId?: string; integrity?: unknown };
         const data = await completeTaskAndReward({
             userId,
             taskId,
             sessionId: body?.sessionId,
+            integrity: normalizeIntegrity(body?.integrity),
             nextSessionStatus: 'completed',
         });
         return reply.status(201).send({ data });
@@ -337,7 +450,7 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
     fastify.post('/api/tasks/:id/survey-submit', { preHandler: [requireAuth] }, async (request, reply) => {
         const userId = request.user!.uid;
         const { id: taskId } = request.params as { id: string };
-        const body = request.body as { sessionId?: string; answers?: Record<string, unknown> };
+        const body = request.body as { sessionId?: string; answers?: Record<string, unknown>; integrity?: unknown };
         if (body.answers != null && typeof body.answers !== 'object') {
             throw new BadRequestError('answers must be an object');
         }
@@ -348,6 +461,7 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
             sessionId: body?.sessionId,
             nextSessionStatus: 'survey_submitted',
             answers: body.answers || {},
+            integrity: normalizeIntegrity(body?.integrity),
             onlySurvey: true,
         });
 

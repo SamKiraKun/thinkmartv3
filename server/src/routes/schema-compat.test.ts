@@ -113,6 +113,147 @@ describe('route/schema compatibility', () => {
         await app.close();
     });
 
+    it('tasks completion route rejects malformed integrity payloads', async () => {
+        const fakeDb = createFakeDb([]);
+        const app = await buildRouteApp('./tasks/writes.js', fakeDb);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/tasks/t1/complete',
+            payload: { integrity: 'invalid' },
+        });
+
+        expect(res.statusCode).toBe(400);
+        const body = res.json() as any;
+        if (typeof body.error === 'string') {
+            expect(body.error).toBe('Bad Request');
+        } else {
+            expect(body).toMatchObject({
+                error: { code: 'BAD_REQUEST' },
+            });
+        }
+        expect(fakeDb.calls.length).toBe(0);
+
+        await app.close();
+    });
+
+    it('survey submit persists answers and integrity payload in task session', async () => {
+        const fakeDb = createFakeDb([
+            {
+                rows: [
+                    {
+                        id: 't_survey',
+                        type: 'SURVEY',
+                        is_active: 1,
+                        frequency: 'ONCE',
+                        reward: 0,
+                        reward_type: 'COIN',
+                        max_completions_per_day: null,
+                        min_duration: 0,
+                        questions: '[{"text":"q1"}]',
+                    },
+                ],
+            },
+            { rows: [] }, // no existing completion
+            {
+                rows: [
+                    {
+                        id: 'session_1',
+                        task_id: 't_survey',
+                        status: 'started',
+                        started_at: new Date(Date.now() - 30_000).toISOString(),
+                    },
+                ],
+            },
+            { rows: [], rowsAffected: 1 }, // update task_sessions
+            { rows: [], rowsAffected: 1 }, // insert completion
+        ]);
+
+        const app = await buildRouteApp('./tasks/writes.js', fakeDb);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/tasks/t_survey/survey-submit',
+            payload: {
+                sessionId: 'session_1',
+                answers: { '0': 'A' },
+                integrity: {
+                    activeSeconds: 35,
+                    backgroundSeconds: 1,
+                    answerCount: 1,
+                    questionCount: 1,
+                    contentOpened: true,
+                    client: 'flutter',
+                },
+            },
+        });
+
+        expect(res.statusCode).toBe(201);
+        const updateCall = fakeDb.calls.find((c) =>
+            c.sql.includes('UPDATE task_sessions')
+        );
+        expect(updateCall).toBeTruthy();
+        expect(String(updateCall!.args[2])).toContain('"answers"');
+        expect(String(updateCall!.args[2])).toContain('"integrity"');
+
+        await app.close();
+    });
+
+    it('video completion requires contentOpened=true when integrity payload is provided', async () => {
+        const fakeDb = createFakeDb([
+            {
+                rows: [
+                    {
+                        id: 't_video',
+                        type: 'WATCH_VIDEO',
+                        is_active: 1,
+                        frequency: 'ONCE',
+                        reward: 5,
+                        reward_type: 'COIN',
+                        max_completions_per_day: null,
+                        min_duration: 0,
+                    },
+                ],
+            },
+            { rows: [] }, // no existing completion
+            {
+                rows: [
+                    {
+                        id: 'session_1',
+                        task_id: 't_video',
+                        status: 'started',
+                        started_at: new Date(Date.now() - 60_000).toISOString(),
+                    },
+                ],
+            },
+        ]);
+
+        const app = await buildRouteApp('./tasks/writes.js', fakeDb);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/tasks/t_video/complete',
+            payload: {
+                sessionId: 'session_1',
+                integrity: {
+                    activeSeconds: 40,
+                    backgroundSeconds: 0,
+                    contentOpened: false,
+                    client: 'flutter',
+                },
+            },
+        });
+
+        expect(res.statusCode).toBe(409);
+        const body = res.json() as any;
+        if (typeof body.error === 'string') {
+            expect(body.error).toBe('Conflict');
+        } else {
+            expect(body).toMatchObject({
+                error: { code: 'CONFLICT' },
+            });
+        }
+
+        await app.close();
+    });
+
     it('wishlist add route inserts snapshot fields and added_at', async () => {
         const fakeDb = createFakeDb([
             { rows: [] }, // existing wishlist check
