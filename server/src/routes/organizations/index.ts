@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/client.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { paginatedResponse } from '../../utils/pagination.js';
+import { BadRequestError } from '../../utils/errors.js';
 
 function parseJson<T>(value: unknown, fallback: T): T {
     if (!value) return fallback;
@@ -16,6 +17,44 @@ function orgStatusFromUser(row: Record<string, any>): 'active' | 'suspended' | '
     if (Boolean(row?.is_banned)) return 'suspended';
     if (!Boolean(row?.is_active)) return 'pending';
     return 'active';
+}
+
+function parseDateRange(query: Record<string, string>, defaultDays: number) {
+    const days = Math.min(365, Math.max(1, Number.parseInt(String(query.days || defaultDays), 10) || defaultDays));
+    const fromRaw = String(query.from || '').trim();
+    const toRaw = String(query.to || '').trim();
+    const from = fromRaw ? new Date(fromRaw) : null;
+    const to = toRaw ? new Date(toRaw) : null;
+
+    if (from && !Number.isFinite(from.getTime())) {
+        throw new BadRequestError('Invalid "from" date');
+    }
+    if (to && !Number.isFinite(to.getTime())) {
+        throw new BadRequestError('Invalid "to" date');
+    }
+
+    const now = new Date();
+    const end = to ? new Date(to) : new Date(now);
+    end.setHours(23, 59, 59, 999);
+
+    const start = from ? new Date(from) : new Date(end);
+    if (!from) {
+        start.setDate(end.getDate() - (days - 1));
+    }
+    start.setHours(0, 0, 0, 0);
+
+    if (start.getTime() > end.getTime()) {
+        throw new BadRequestError('"from" date must be before "to" date');
+    }
+    return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
+function csvEscape(value: unknown): string {
+    const str = String(value ?? '');
+    if (str.includes('"') || str.includes(',') || str.includes('\n') || str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
 }
 
 export default async function organizationRoutes(fastify: FastifyInstance) {
@@ -148,35 +187,112 @@ export default async function organizationRoutes(fastify: FastifyInstance) {
         return paginatedResponse(members, total, page, limit);
     });
 
-    fastify.get('/api/organizations/me/earnings', async (request) => {
+    fastify.get('/api/organizations/me/earnings', async (request, reply) => {
         const db = getDb();
         const orgId = request.user!.uid;
         const query = request.query as Record<string, string>;
         const page = Math.max(1, Number.parseInt(query.page || '1', 10));
         const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit || '50', 10)));
         const offset = (page - 1) * limit;
+        const search = String(query.search || '').trim();
+        const sortDir = String(query.sort || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+        const exportFormat = String(query.export || '').trim().toLowerCase();
+        const sourceType = String(query.sourceType || '').trim().toLowerCase();
+        if (sourceType && sourceType !== 'earning') {
+            return {
+                data: {
+                    logs: [],
+                    stats: {
+                        totalEarnings: 0,
+                        thisMonth: 0,
+                        pendingPayout: 0,
+                    },
+                    pagination: {
+                        page,
+                        limit,
+                        total: 0,
+                        totalPages: 0,
+                        hasNext: false,
+                        hasPrev: page > 1,
+                    },
+                },
+            };
+        }
+        if (exportFormat && exportFormat !== 'csv') {
+            throw new BadRequestError('Unsupported export format');
+        }
+        const hasDateFilter = Boolean(query.from || query.to || query.days);
+        const dateRange = hasDateFilter ? parseDateRange(query, 180) : null;
+
+        const whereParts: string[] = [
+            't.user_id = ?',
+            "t.type = 'TEAM_INCOME'",
+            "t.currency IN ('CASH','INR')",
+        ];
+        const whereArgs: any[] = [orgId];
+        if (dateRange) {
+            whereParts.push('t.created_at >= ?');
+            whereParts.push('t.created_at <= ?');
+            whereArgs.push(dateRange.startIso, dateRange.endIso);
+        }
+        if (search) {
+            const term = `%${search}%`;
+            whereParts.push('(u.name LIKE ? OR t.related_user_id LIKE ?)');
+            whereArgs.push(term, term);
+        }
+        const where = whereParts.join(' AND ');
+
+        if (exportFormat === 'csv') {
+            const rowsRes = await db.execute({
+                sql: `SELECT t.id, t.amount, t.description, t.related_user_id, t.created_at, u.name as source_user_name
+                      FROM transactions t
+                      LEFT JOIN users u ON u.uid = t.related_user_id
+                      WHERE ${where}
+                      ORDER BY t.created_at ${sortDir}, t.id ${sortDir}`,
+                args: whereArgs,
+            });
+            const lines = [
+                'id,amount,source_type,source_user_id,source_user_name,created_at',
+                ...(rowsRes.rows as Array<Record<string, any>>).map((row) =>
+                    [
+                        csvEscape(row.id),
+                        csvEscape(Number(row.amount || 0).toFixed(2)),
+                        csvEscape('earning'),
+                        csvEscape(row.related_user_id || ''),
+                        csvEscape(row.source_user_name || ''),
+                        csvEscape(row.created_at || ''),
+                    ].join(',')
+                ),
+            ];
+            const csv = lines.join('\n');
+            reply.header('content-type', 'text/csv; charset=utf-8');
+            reply.header('content-disposition', `attachment; filename="organization-earnings-${new Date().toISOString().slice(0, 10)}.csv"`);
+            return reply.send(csv);
+        }
 
         const [countRes, listRes, totalRes, monthRes, walletRes] = await Promise.all([
             db.execute({
                 sql: `SELECT COUNT(*) as total
-                      FROM transactions
-                      WHERE user_id = ? AND type = 'TEAM_INCOME' AND currency IN ('CASH','INR')`,
-                args: [orgId],
+                      FROM transactions t
+                      LEFT JOIN users u ON u.uid = t.related_user_id
+                      WHERE ${where}`,
+                args: whereArgs,
             }),
             db.execute({
                 sql: `SELECT t.id, t.amount, t.type, t.description, t.related_user_id, t.created_at, u.name as source_user_name
                       FROM transactions t
                       LEFT JOIN users u ON u.uid = t.related_user_id
-                      WHERE t.user_id = ? AND t.type = 'TEAM_INCOME' AND t.currency IN ('CASH','INR')
-                      ORDER BY t.created_at DESC, t.id DESC
+                      WHERE ${where}
+                      ORDER BY t.created_at ${sortDir}, t.id ${sortDir}
                       LIMIT ? OFFSET ?`,
-                args: [orgId, limit, offset],
+                args: [...whereArgs, limit, offset],
             }),
             db.execute({
                 sql: `SELECT COALESCE(SUM(amount), 0) as total
-                      FROM transactions
-                      WHERE user_id = ? AND type = 'TEAM_INCOME' AND currency IN ('CASH','INR')`,
-                args: [orgId],
+                      FROM transactions t
+                      LEFT JOIN users u ON u.uid = t.related_user_id
+                      WHERE ${where}`,
+                args: whereArgs,
             }),
             (() => {
                 const start = new Date();
@@ -217,6 +333,12 @@ export default async function organizationRoutes(fastify: FastifyInstance) {
                     totalPages: Math.ceil(Number(countRes.rows[0]?.total || 0) / limit) || 0,
                     hasNext: page * limit < Number(countRes.rows[0]?.total || 0),
                     hasPrev: page > 1,
+                },
+                filters: {
+                    search: search || null,
+                    from: dateRange?.startIso || null,
+                    to: dateRange?.endIso || null,
+                    sort: sortDir.toLowerCase(),
                 },
             },
         };

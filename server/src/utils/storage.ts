@@ -1,80 +1,100 @@
 // File: server/src/utils/storage.ts
 /**
- * R2 / S3 Storage Client Configuration
+ * Cloudinary Storage Client Configuration
  */
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { v2 as cloudinary } from 'cloudinary';
 
-let s3Client: S3Client | null = null;
+let isConfigured = false;
 
 function isProductionLikeEnv() {
     return process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging';
 }
 
-function getS3Client(): S3Client {
-    if (s3Client) return s3Client;
+function configureCloudinary() {
+    if (isConfigured) return;
 
-    s3Client = new S3Client({
-        region: process.env.R2_REGION || 'auto',
-        endpoint: process.env.R2_ENDPOINT,
-        credentials: {
-            accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-            secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-        },
-    });
-
-    return s3Client;
+    if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+        cloudinary.config({
+            cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+            api_key: process.env.CLOUDINARY_API_KEY,
+            api_secret: process.env.CLOUDINARY_API_SECRET,
+            secure: true,
+        });
+        isConfigured = true;
+    }
 }
 
-export const BUCKET_NAME = process.env.R2_BUCKET_NAME || 'thinkmart-uploads';
-
 /**
- * Generate a presigned URL for uploading a file directly from the client to R2.
- * @param key The object key (path and filename) in the bucket
- * @param contentType The MIME type of the file to be uploaded
- * @param expiresIn Time in seconds until the URL expires (default: 3600)
+ * Generate upload parameters for client-side direct upload to Cloudinary.
+ * @param key The object key (path and filename) without extension
+ * @param contentType The MIME type of the file
  */
 export async function generatePresignedUploadUrl(
     key: string,
     contentType: string,
     expiresIn = 3600
-): Promise<{ uploadUrl: string; key: string }> {
-    // Development-only mock fallback. Staging/production must be explicitly configured.
-    if (!process.env.R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY) {
+): Promise<{ uploadUrl: string; key: string, method?: string, fields?: Record<string, string>, publicUrl?: string }> {
+    configureCloudinary();
+
+    if (!isConfigured) {
         if (isProductionLikeEnv()) {
-            throw new Error('R2 storage is not configured for this environment');
+            throw new Error('Cloudinary storage is not configured for this environment');
         }
 
-        console.warn('R2 credentials missing, returning mock presigned URL (development only)');
+        console.warn('Cloudinary credentials missing, returning mock upload URL (development only)');
         return {
-            uploadUrl: `http://localhost:3001/api/mock-upload?key=${encodeURIComponent(key)}`,
+            uploadUrl: `http://localhost:3001/api/mock-upload`,
             key,
+            publicUrl: `https://pub-mock-thinkmart.cloudinary.test/${key}`
         };
     }
 
-    const command = new PutObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: key,
-        ContentType: contentType,
-    });
+    const timestamp = Math.round((new Date()).getTime() / 1000);
+    const apiSecret = cloudinary.config().api_secret;
 
-    const uploadUrl = await getSignedUrl(getS3Client(), command, { expiresIn });
-    return { uploadUrl, key };
+    const paramsToSign: Record<string, any> = {
+        timestamp: timestamp,
+        public_id: key,
+    };
+
+    if (process.env.CLOUDINARY_UPLOAD_PRESET) {
+        paramsToSign.upload_preset = process.env.CLOUDINARY_UPLOAD_PRESET;
+    }
+
+    const signature = cloudinary.utils.api_sign_request(paramsToSign, apiSecret!);
+
+    const cloudName = cloudinary.config().cloud_name;
+    const uploadUrl = `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`;
+
+    const fields = {
+        api_key: cloudinary.config().api_key!,
+        timestamp: timestamp.toString(),
+        signature: signature,
+        public_id: key,
+    } as Record<string, string>;
+
+    if (process.env.CLOUDINARY_UPLOAD_PRESET) {
+        fields.upload_preset = process.env.CLOUDINARY_UPLOAD_PRESET;
+    }
+
+    const publicUrl = cloudinary.url(key, { secure: true });
+
+    return {
+        uploadUrl,
+        key,
+        method: 'POST',
+        fields,
+        publicUrl
+    };
 }
 
 /**
  * Generate a public URL for accessing the uploaded object.
  */
 export function getPublicUrl(key: string): string {
-    const publicBase = process.env.R2_PUBLIC_URL || process.env.R2_PUBLIC_DOMAIN;
-
-    if (!publicBase) {
-        if (isProductionLikeEnv()) {
-            throw new Error('R2_PUBLIC_URL is required in production/staging');
-        }
-
-        return `https://pub-mock-thinkmart.r2.dev/${key}`;
+    configureCloudinary();
+    if (!isConfigured) {
+        return `https://pub-mock-thinkmart.cloudinary.test/${key}`;
     }
-
-    return `${publicBase.replace(/\/+$/, '')}/${key}`;
+    return cloudinary.url(key, { secure: true });
 }

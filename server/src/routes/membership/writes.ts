@@ -4,6 +4,7 @@ import { withTransaction } from '../../db/client.js';
 import { randomUUID } from 'crypto';
 import { runIdempotentMutation } from '../../utils/idempotency.js';
 import { BadRequestError, NotFoundError } from '../../utils/errors.js';
+import { enqueueReferralProcessing } from '../../jobs/enqueue.js';
 
 export default async function membershipWriteRoutes(app: FastifyInstance) {
     /**
@@ -126,9 +127,12 @@ export default async function membershipWriteRoutes(app: FastifyInstance) {
 
                     return { payload: { data: { success: true, activatedAt: now } }, statusCode: 200 };
                 },
-                afterCommit: async (payload) => {
-                    // Trigger referral payout generation logic
-                    // In a real app we would enqueue a job to crawl upline and emit payouts
+                afterCommit: async (result) => {
+                    if (result.cached) return;
+                    await enqueueReferralProcessing({
+                        userId,
+                        action: 'membership_purchase',
+                    });
                 },
             });
         }

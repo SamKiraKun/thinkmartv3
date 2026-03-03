@@ -47,8 +47,17 @@ type GameConfig = {
     updatedBy?: string;
 };
 
+type AdminCmsDto = {
+    termsOfService: string;
+    privacyPolicy: string;
+    aboutUs: string;
+    updatedAt?: string;
+    updatedBy?: string;
+};
+
 const GENERAL_SETTINGS_KEY = 'general';
 const GAME_CONFIGS_KEY = 'game_configs';
+const CMS_CONTENT_KEY = 'cms_content';
 
 const DEFAULT_SETTINGS: AdminSettingsDto = {
     minWithdrawalAmount: 500,
@@ -100,6 +109,12 @@ const DEFAULT_GAME_CONFIGS: GameConfig[] = [
         ],
     },
 ];
+
+const DEFAULT_CMS_CONTENT: AdminCmsDto = {
+    termsOfService: '',
+    privacyPolicy: '',
+    aboutUs: '',
+};
 
 function parseJson<T>(value: unknown, fallback: T): T {
     if (!value) return fallback;
@@ -171,6 +186,17 @@ function normalizeGameConfigs(value: unknown): GameConfig[] {
     });
 }
 
+function normalizeCmsContent(value: unknown, updatedAt?: string, updatedBy?: string): AdminCmsDto {
+    const raw = parseJson<JsonObject>(value, {});
+    return {
+        termsOfService: String(raw.termsOfService ?? raw.terms ?? DEFAULT_CMS_CONTENT.termsOfService),
+        privacyPolicy: String(raw.privacyPolicy ?? raw.privacy ?? DEFAULT_CMS_CONTENT.privacyPolicy),
+        aboutUs: String(raw.aboutUs ?? raw.about ?? DEFAULT_CMS_CONTENT.aboutUs),
+        updatedAt,
+        updatedBy,
+    };
+}
+
 function parseVendorConfig(value: unknown): JsonObject {
     return parseJson<JsonObject>(value, {});
 }
@@ -224,6 +250,65 @@ export default async function adminExtraRoutes(fastify: FastifyInstance) {
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             args: [randomUUID(), adminId, 'settings.update', 'settings', GENERAL_SETTINGS_KEY, JSON.stringify({ keys: Object.keys(body || {}) }), request.ip, now],
         });
+        return { data: { updated: true } };
+    });
+
+    fastify.get('/api/admin/cms', async () => {
+        const db = getDb();
+        const res = await db.execute({
+            sql: 'SELECT key, value, updated_at, updated_by FROM settings WHERE key = ?',
+            args: [CMS_CONTENT_KEY],
+        });
+        const row = res.rows[0] as Record<string, any> | undefined;
+        return {
+            data: normalizeCmsContent(
+                row?.value,
+                row?.updated_at ? String(row.updated_at) : undefined,
+                row?.updated_by ? String(row.updated_by) : undefined
+            ),
+        };
+    });
+
+    fastify.put('/api/admin/cms', async (request) => {
+        const db = getDb();
+        const adminId = request.user!.uid;
+        const body = (request.body || {}) as Partial<AdminCmsDto>;
+        const currentRes = await db.execute({
+            sql: 'SELECT value FROM settings WHERE key = ?',
+            args: [CMS_CONTENT_KEY],
+        });
+        const current = normalizeCmsContent(currentRes.rows[0]?.value);
+        const next = normalizeCmsContent({
+            termsOfService: body.termsOfService !== undefined ? String(body.termsOfService).trim() : current.termsOfService,
+            privacyPolicy: body.privacyPolicy !== undefined ? String(body.privacyPolicy).trim() : current.privacyPolicy,
+            aboutUs: body.aboutUs !== undefined ? String(body.aboutUs).trim() : current.aboutUs,
+        });
+
+        const now = nowIso();
+        await db.execute({
+            sql: `INSERT INTO settings (key, value, updated_at, updated_by)
+                  VALUES (?, ?, ?, ?)
+                  ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by`,
+            args: [CMS_CONTENT_KEY, JSON.stringify(next), now, adminId],
+        });
+        await db.execute({
+            sql: `INSERT INTO audit_logs (id, actor_uid, action, target_type, target_id, details, ip_address, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+                randomUUID(),
+                adminId,
+                'cms.update',
+                'settings',
+                CMS_CONTENT_KEY,
+                JSON.stringify({ keys: Object.keys(body || {}) }),
+                request.ip,
+                now,
+            ],
+        });
+
         return { data: { updated: true } };
     });
 

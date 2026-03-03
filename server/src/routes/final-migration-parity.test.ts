@@ -160,6 +160,48 @@ describe('final migration parity routes', () => {
     await app.close();
   });
 
+  it('admin cms route returns normalized defaults when no settings row exists', async () => {
+    const fakeDb = createFakeDb([{ rows: [] }]);
+    const app = await buildRouteApp('./admin/extras.js', fakeDb, { userOverrides: { role: 'admin' } });
+
+    const res = await app.inject({ method: 'GET', url: '/api/admin/cms' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      data: {
+        termsOfService: '',
+        privacyPolicy: '',
+        aboutUs: '',
+      },
+    });
+
+    await app.close();
+  });
+
+  it('admin cms update route stores content under settings.cms_content', async () => {
+    const fakeDb = createFakeDb([
+      { rows: [] }, // current cms settings row
+      { rows: [], rowsAffected: 1 }, // upsert settings
+      { rows: [], rowsAffected: 1 }, // audit log
+    ]);
+    const app = await buildRouteApp('./admin/extras.js', fakeDb, { userOverrides: { role: 'admin' } });
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/api/admin/cms',
+      payload: {
+        termsOfService: 'Terms text',
+        privacyPolicy: 'Privacy text',
+        aboutUs: 'About text',
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(fakeDb.calls.some((c) => c.sql.includes('INSERT INTO settings') && c.args[0] === 'cms_content')).toBe(true);
+    expect(fakeDb.calls.some((c) => c.sql.includes('INSERT INTO audit_logs') && c.args[2] === 'cms.update')).toBe(true);
+
+    await app.close();
+  });
+
   it('admin vendors suspend route requires reason and does not mutate on invalid payload', async () => {
     const fakeDb = createFakeDb([]);
     const app = await buildRouteApp('./admin/extras.js', fakeDb, { userOverrides: { role: 'admin' } });

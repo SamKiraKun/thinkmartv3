@@ -144,6 +144,49 @@ describe('role API hardening routes', () => {
         await app.close();
     });
 
+    it('vendor products route scopes query to vendor and supports search filter', async () => {
+        const fakeDb = createFakeDb([
+            { rows: [{ total: 1 }] },
+            {
+                rows: [{
+                    id: 'p1',
+                    name: 'Vendor Phone',
+                    description: 'Smartphone',
+                    price: 9999,
+                    category: 'electronics',
+                    image: 'https://example.com/p1.png',
+                    images: null,
+                    status: 'pending',
+                    stock: 10,
+                    in_stock: 1,
+                    coin_price: 0,
+                    commission: 0,
+                    coin_only: 0,
+                    cash_only: 0,
+                    delivery_days: 7,
+                    created_at: '2026-02-21T00:00:00.000Z',
+                    updated_at: '2026-02-21T00:00:00.000Z',
+                }],
+            },
+        ]);
+        const app = await buildRouteApp('./vendor/index.js', fakeDb, { role: 'vendor', uid: 'vendor-1' });
+
+        const res = await app.inject({
+            method: 'GET',
+            url: '/api/vendor/products?search=phone&page=1&limit=20',
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toMatchObject({
+            data: [{ id: 'p1', name: 'Vendor Phone' }],
+        });
+        expect(fakeDb.calls[0].sql).toContain('vendor = ?');
+        expect(fakeDb.calls[0].args[0]).toBe('vendor-1');
+        expect(fakeDb.calls[0].sql).toContain('name LIKE ? OR description LIKE ?');
+
+        await app.close();
+    });
+
     it('partner users route applies not_submitted kyc filter safely', async () => {
         const fakeDb = createFakeDb([
             { rows: [{ partner_config: JSON.stringify({ assignedCities: ['Pune'], commissionPercentages: { Pune: 5 } }) }] },
@@ -174,6 +217,57 @@ describe('role API hardening routes', () => {
             data: [{ id: 'user-1', kycStatus: 'not_submitted' }],
         });
         expect(fakeDb.calls[1].sql).toContain("COALESCE(kyc_status, 'not_submitted') = 'not_submitted'");
+
+        await app.close();
+    });
+
+    it('partner withdrawal create route enforces partner policy and creates pending record', async () => {
+        const fakeDb = createFakeDb([
+            { rows: [{ value: JSON.stringify({ minWithdrawalAmount: 500, maxWithdrawalAmount: 50000, maxWithdrawalsPerMonth: 2, withdrawalCooldownDays: 0 }) }] }, // settings
+            { rows: [{ uid: 'p1', role: 'partner', kyc_status: 'verified' }] }, // partner user
+            { rows: [] }, // pending withdrawals
+            { rows: [{ total: 0 }] }, // monthly count
+            { rows: [], rowsAffected: 1 }, // wallet debit
+            { rows: [], rowsAffected: 1 }, // withdrawal insert
+            { rows: [], rowsAffected: 1 }, // transaction insert
+        ]);
+        const app = await buildRouteApp('./partner/index.js', fakeDb, { role: 'partner', uid: 'p1' });
+
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/partner/withdrawals',
+            payload: { amount: 600, method: 'upi', upiId: 'partner@upi' },
+        });
+
+        expect(res.statusCode).toBe(201);
+        expect(res.json()).toMatchObject({
+            data: { status: 'pending', amount: 600 },
+        });
+        expect(fakeDb.calls.some((c) => c.sql.includes('INSERT INTO withdrawals'))).toBe(true);
+        expect(fakeDb.calls.some((c) => c.sql.includes('INSERT INTO transactions'))).toBe(true);
+
+        await app.close();
+    });
+
+    it('partner withdrawal cancel route restores balance for own pending withdrawal', async () => {
+        const fakeDb = createFakeDb([
+            { rows: [{ id: 'w1', user_id: 'p1', amount: 600, status: 'pending' }] }, // select existing
+            { rows: [], rowsAffected: 1 }, // update withdrawals
+            { rows: [], rowsAffected: 1 }, // update wallets
+            { rows: [], rowsAffected: 1 }, // update transactions
+        ]);
+        const app = await buildRouteApp('./partner/index.js', fakeDb, { role: 'partner', uid: 'p1' });
+
+        const res = await app.inject({
+            method: 'PATCH',
+            url: '/api/partner/withdrawals/w1/cancel',
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toMatchObject({
+            data: { updated: true, status: 'rejected', amount: 600 },
+        });
+        expect(fakeDb.calls.some((c) => c.sql.includes('UPDATE wallets'))).toBe(true);
 
         await app.close();
     });

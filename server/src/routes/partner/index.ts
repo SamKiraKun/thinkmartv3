@@ -1,10 +1,19 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb } from '../../db/client.js';
+import { getDb, withTransaction } from '../../db/client.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { paginatedResponse } from '../../utils/pagination.js';
 import { randomUUID } from 'crypto';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../utils/errors.js';
 
 type JsonValue = any;
+type WithdrawalMethod = 'bank' | 'wallet' | 'upi';
+
+type WithdrawalPolicy = {
+    minAmount: number;
+    maxAmount: number;
+    maxPerMonth: number;
+    cooldownDays: number;
+};
 
 function parseJson<T>(value: unknown, fallback: T): T {
     if (!value) return fallback;
@@ -61,6 +70,78 @@ function formatDateKey(date: Date): string {
 function txTimestampMs(value: unknown): number {
     const ms = Date.parse(String(value || ''));
     return Number.isFinite(ms) ? ms : 0;
+}
+
+function parseDateRange(query: Record<string, string>, defaultDays: number) {
+    const days = Math.min(365, Math.max(1, Number.parseInt(String(query.days || defaultDays), 10) || defaultDays));
+    const fromRaw = String(query.from || '').trim();
+    const toRaw = String(query.to || '').trim();
+
+    const now = new Date();
+    const parsedFrom = fromRaw ? new Date(fromRaw) : null;
+    const parsedTo = toRaw ? new Date(toRaw) : null;
+
+    if (parsedFrom && !Number.isFinite(parsedFrom.getTime())) {
+        throw new BadRequestError('Invalid "from" date');
+    }
+    if (parsedTo && !Number.isFinite(parsedTo.getTime())) {
+        throw new BadRequestError('Invalid "to" date');
+    }
+
+    let start = parsedFrom ? new Date(parsedFrom) : new Date(now);
+    let end = parsedTo ? new Date(parsedTo) : new Date(now);
+
+    if (!parsedFrom) {
+        start.setDate(end.getDate() - (days - 1));
+    }
+    if (!parsedTo) {
+        end = new Date(now);
+    }
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    if (start.getTime() > end.getTime()) {
+        throw new BadRequestError('"from" date must be before "to" date');
+    }
+
+    const rangeDays = Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+    if (rangeDays > 366) {
+        throw new BadRequestError('Date range cannot exceed 366 days');
+    }
+
+    return {
+        start,
+        end,
+        startIso: start.toISOString(),
+        endIso: end.toISOString(),
+        rangeDays,
+    };
+}
+
+function parseWithdrawalPolicy(settingsValue: unknown): WithdrawalPolicy {
+    const fallback: WithdrawalPolicy = {
+        minAmount: 500,
+        maxAmount: 50000,
+        maxPerMonth: 2,
+        cooldownDays: 24,
+    };
+    if (typeof settingsValue !== 'string') return fallback;
+    try {
+        const parsed = JSON.parse(settingsValue) as Record<string, unknown>;
+        const minAmount = Number(parsed.minWithdrawalAmount);
+        const maxAmount = Number(parsed.maxWithdrawalAmount);
+        const maxPerMonth = Number(parsed.maxWithdrawalsPerMonth ?? parsed.monthlyWithdrawalLimit);
+        const cooldownDays = Number(parsed.withdrawalCooldownDays);
+        return {
+            minAmount: Number.isFinite(minAmount) && minAmount > 0 ? minAmount : fallback.minAmount,
+            maxAmount: Number.isFinite(maxAmount) && maxAmount > 0 ? maxAmount : fallback.maxAmount,
+            maxPerMonth: Number.isFinite(maxPerMonth) && maxPerMonth > 0 ? maxPerMonth : fallback.maxPerMonth,
+            cooldownDays: Number.isFinite(cooldownDays) && cooldownDays >= 0 ? cooldownDays : fallback.cooldownDays,
+        };
+    } catch {
+        return fallback;
+    }
 }
 
 function mapProductRow(row: Record<string, any>) {
@@ -232,37 +313,61 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
         const db = getDb();
         const partnerId = request.user!.uid;
         const query = request.query as Record<string, string>;
-        const days = Math.min(365, Math.max(1, Number.parseInt(query.days || '30', 10)));
-        const start = new Date();
-        start.setHours(0, 0, 0, 0);
-        start.setDate(start.getDate() - (days - 1));
-        const startIso = start.toISOString();
+        const { start, startIso, endIso, rangeDays } = parseDateRange(query, 30);
+        const cityFilterRaw = String(query.city || '').trim();
+        const sourceType = String(query.sourceType || '').trim().toLowerCase();
+        if (sourceType && !['purchase', 'withdrawal'].includes(sourceType)) {
+            throw new BadRequestError('sourceType must be purchase or withdrawal');
+        }
 
         const partnerRes = await db.execute({
             sql: 'SELECT partner_config FROM users WHERE uid = ?',
             args: [partnerId],
         });
         const { cities } = partnerCitiesAndPercentages(partnerRes.rows[0]?.partner_config);
+        if (cityFilterRaw && !cities.includes(cityFilterRaw)) {
+            throw new BadRequestError('Selected city is not assigned to this partner');
+        }
+        const citiesForGrowth = cityFilterRaw ? [cityFilterRaw] : cities;
+
+        const txFilters: string[] = [
+            't.user_id = ?',
+            "t.type IN ('PARTNER_COMMISSION', 'TEAM_INCOME')",
+            "t.currency IN ('CASH','INR')",
+            't.created_at >= ?',
+            't.created_at <= ?',
+        ];
+        const txParams: any[] = [partnerId, startIso, endIso];
+
+        if (cityFilterRaw) {
+            txFilters.push('u.city = ?');
+            txParams.push(cityFilterRaw);
+        }
+        if (sourceType === 'withdrawal') {
+            txFilters.push("src.type = 'WITHDRAWAL'");
+        } else if (sourceType === 'purchase') {
+            txFilters.push("(src.type IS NULL OR src.type <> 'WITHDRAWAL')");
+        }
+        const txWhere = txFilters.join(' AND ');
 
         const [txRes, usersRes] = await Promise.all([
             db.execute({
-                sql: `SELECT id, amount, type, description, created_at
-                      FROM transactions
-                      WHERE user_id = ?
-                        AND type IN ('PARTNER_COMMISSION', 'TEAM_INCOME')
-                        AND currency IN ('CASH','INR')
-                        AND created_at >= ?
-                      ORDER BY created_at ASC`,
-                args: [partnerId, startIso],
+                sql: `SELECT t.id, t.amount, t.type, t.description, t.created_at
+                      FROM transactions t
+                      LEFT JOIN users u ON u.uid = t.related_user_id
+                      LEFT JOIN transactions src ON src.id = t.source_txn_id
+                      WHERE ${txWhere}
+                      ORDER BY t.created_at ASC`,
+                args: txParams,
             }),
-            cities.length > 0
+            citiesForGrowth.length > 0
                 ? (() => {
-                    const cityFilter = inClause('city', cities);
+                    const cityFilter = inClause('city', citiesForGrowth);
                     return db.execute({
                         sql: `SELECT uid, created_at FROM users
-                              WHERE ${cityFilter.sql} AND created_at >= ?
+                              WHERE ${cityFilter.sql} AND created_at >= ? AND created_at <= ?
                               ORDER BY created_at ASC`,
-                        args: [...cityFilter.args, startIso],
+                        args: [...cityFilter.args, startIso, endIso],
                     });
                 })()
                 : Promise.resolve({ rows: [] } as any),
@@ -288,7 +393,7 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
 
         const earningsChart: Array<{ date: string; earnings: number; transactions: number }> = [];
         const userGrowthChart: Array<{ date: string; newUsers: number }> = [];
-        for (let i = 0; i < days; i++) {
+        for (let i = 0; i < rangeDays; i++) {
             const d = new Date(start);
             d.setDate(start.getDate() + i);
             const key = formatDateKey(d);
@@ -311,7 +416,14 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
                     totalEarnings,
                     totalTransactions: txRes.rows.length,
                     newUsers: (usersRes.rows as any[]).length,
-                    avgDailyEarnings: days > 0 ? Math.round((totalEarnings / days) * 100) / 100 : 0,
+                    avgDailyEarnings: rangeDays > 0 ? Math.round((totalEarnings / rangeDays) * 100) / 100 : 0,
+                },
+                filters: {
+                    from: startIso,
+                    to: endIso,
+                    city: cityFilterRaw || null,
+                    sourceType: sourceType || null,
+                    days: rangeDays,
                 },
             },
         };
@@ -324,14 +436,58 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
         const page = Math.max(1, Number.parseInt(query.page || '1', 10));
         const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit || '30', 10)));
         const offset = (page - 1) * limit;
+        const city = String(query.city || '').trim();
+        const sourceType = String(query.sourceType || '').trim().toLowerCase();
+        const search = String(query.search || '').trim();
+        if (sourceType && !['purchase', 'withdrawal'].includes(sourceType)) {
+            throw new BadRequestError('sourceType must be purchase or withdrawal');
+        }
+        const hasDateFilter = Boolean(query.from || query.to || query.days);
+        const dateRange = hasDateFilter ? parseDateRange(query, 365) : null;
+
+        const partnerRes = await db.execute({
+            sql: 'SELECT partner_config FROM users WHERE uid = ?',
+            args: [partnerId],
+        });
+        const { cities } = partnerCitiesAndPercentages(partnerRes.rows[0]?.partner_config);
+        if (city && !cities.includes(city)) {
+            throw new BadRequestError('Selected city is not assigned to this partner');
+        }
+
+        const whereParts: string[] = [
+            't.user_id = ?',
+            "t.type IN ('PARTNER_COMMISSION', 'TEAM_INCOME')",
+            "t.currency IN ('CASH','INR')",
+        ];
+        const whereArgs: any[] = [partnerId];
+        if (dateRange) {
+            whereParts.push('t.created_at >= ?');
+            whereParts.push('t.created_at <= ?');
+            whereArgs.push(dateRange.startIso, dateRange.endIso);
+        }
+        if (city) {
+            whereParts.push('u.city = ?');
+            whereArgs.push(city);
+        }
+        if (sourceType === 'withdrawal') {
+            whereParts.push("src.type = 'WITHDRAWAL'");
+        } else if (sourceType === 'purchase') {
+            whereParts.push("(src.type IS NULL OR src.type <> 'WITHDRAWAL')");
+        }
+        if (search) {
+            const term = `%${search}%`;
+            whereParts.push('(u.name LIKE ? OR t.related_user_id LIKE ?)');
+            whereArgs.push(term, term);
+        }
+        const where = whereParts.join(' AND ');
 
         const countRes = await db.execute({
             sql: `SELECT COUNT(*) as total
-                  FROM transactions
-                  WHERE user_id = ?
-                    AND type IN ('PARTNER_COMMISSION', 'TEAM_INCOME')
-                    AND currency IN ('CASH','INR')`,
-            args: [partnerId],
+                  FROM transactions t
+                  LEFT JOIN users u ON u.uid = t.related_user_id
+                  LEFT JOIN transactions src ON src.id = t.source_txn_id
+                  WHERE ${where}`,
+            args: whereArgs,
         });
         const total = Number(countRes.rows[0]?.total || 0);
 
@@ -343,12 +499,22 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
                   FROM transactions t
                   LEFT JOIN users u ON u.uid = t.related_user_id
                   LEFT JOIN transactions src ON src.id = t.source_txn_id
-                  WHERE t.user_id = ?
-                    AND t.type IN ('PARTNER_COMMISSION', 'TEAM_INCOME')
-                    AND t.currency IN ('CASH','INR')
+                  WHERE ${where}
                   ORDER BY t.created_at DESC, t.id DESC
                   LIMIT ? OFFSET ?`,
-            args: [partnerId, limit, offset],
+            args: [...whereArgs, limit, offset],
+        });
+
+        const summaryRes = await db.execute({
+            sql: `SELECT
+                    COALESCE(SUM(t.amount), 0) as total_amount,
+                    COALESCE(SUM(CASE WHEN src.type = 'WITHDRAWAL' THEN t.amount ELSE 0 END), 0) as withdrawal_amount,
+                    COALESCE(SUM(CASE WHEN src.type IS NULL OR src.type <> 'WITHDRAWAL' THEN t.amount ELSE 0 END), 0) as purchase_amount
+                  FROM transactions t
+                  LEFT JOIN users u ON u.uid = t.related_user_id
+                  LEFT JOIN transactions src ON src.id = t.source_txn_id
+                  WHERE ${where}`,
+            args: whereArgs,
         });
 
         const commissions = result.rows.map((row: Record<string, any>) => {
@@ -373,12 +539,28 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
             };
         });
 
-        return paginatedResponse(
+        const paged = paginatedResponse(
             commissions.map(({ _ts, ...rest }: any) => rest),
             total,
             page,
             limit
         );
+        const summary = summaryRes.rows[0] as Record<string, any> | undefined;
+        return {
+            ...paged,
+            summary: {
+                totalAmount: Number(summary?.total_amount || 0),
+                purchaseAmount: Number(summary?.purchase_amount || 0),
+                withdrawalAmount: Number(summary?.withdrawal_amount || 0),
+            },
+            filters: {
+                from: dateRange?.startIso || null,
+                to: dateRange?.endIso || null,
+                city: city || null,
+                sourceType: sourceType || null,
+                search: search || null,
+            },
+        };
     });
 
     fastify.get('/api/partner/withdrawals', async (request) => {
@@ -459,6 +641,202 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
                 totalPaid: Number(summary?.total_paid || 0),
             },
         };
+    });
+
+    fastify.post('/api/partner/withdrawals', async (request, reply) => {
+        const db = getDb();
+        const partnerId = request.user!.uid;
+        const body = (request.body || {}) as {
+            amount: number;
+            method: WithdrawalMethod;
+            bankDetails?: Record<string, string>;
+            upiId?: string;
+        };
+
+        if (!Number.isFinite(body.amount) || !body.method) {
+            throw new BadRequestError('Amount and method are required');
+        }
+        if (body.amount <= 0) {
+            throw new BadRequestError('Amount must be positive');
+        }
+        if (!['bank', 'wallet', 'upi'].includes(body.method)) {
+            throw new BadRequestError('Invalid withdrawal method');
+        }
+        if (body.method === 'bank' && (!body.bankDetails || Object.keys(body.bankDetails).length === 0)) {
+            throw new BadRequestError('bankDetails are required for bank withdrawals');
+        }
+        if (body.method === 'upi' && !body.upiId?.trim()) {
+            throw new BadRequestError('upiId is required for UPI withdrawals');
+        }
+
+        const settings = await db.execute({
+            sql: `SELECT value FROM settings WHERE key = ?`,
+            args: ['general'],
+        });
+        const policy = parseWithdrawalPolicy(settings.rows[0]?.value);
+        if (body.amount < policy.minAmount) {
+            throw new BadRequestError(`Minimum withdrawal amount is ${policy.minAmount}`);
+        }
+        if (body.amount > policy.maxAmount) {
+            throw new BadRequestError(`Maximum withdrawal amount is ${policy.maxAmount}`);
+        }
+
+        const userResult = await db.execute({
+            sql: `SELECT uid, role, kyc_status FROM users WHERE uid = ?`,
+            args: [partnerId],
+        });
+        if (userResult.rows.length === 0) throw new NotFoundError('User not found');
+        if (String(userResult.rows[0]?.role || '') !== 'partner') {
+            throw new ForbiddenError('Partner access required');
+        }
+        const kycStatus = String(userResult.rows[0]?.kyc_status || 'not_submitted');
+        if (kycStatus !== 'verified') {
+            throw new BadRequestError('KYC verification required. Please complete your KYC to withdraw funds.');
+        }
+
+        const pendingResult = await db.execute({
+            sql: `SELECT id FROM withdrawals
+                  WHERE user_id = ? AND status = 'pending'
+                  LIMIT 1`,
+            args: [partnerId],
+        });
+        if (pendingResult.rows.length > 0) {
+            throw new BadRequestError('You already have a pending withdrawal request. Please wait for it to be processed.');
+        }
+
+        if (policy.cooldownDays > 0) {
+            const lastProcessedResult = await db.execute({
+                sql: `SELECT processed_at
+                      FROM withdrawals
+                      WHERE user_id = ?
+                        AND status IN ('completed', 'rejected')
+                        AND processed_at IS NOT NULL
+                      ORDER BY processed_at DESC
+                      LIMIT 1`,
+                args: [partnerId],
+            });
+            if (lastProcessedResult.rows.length > 0) {
+                const lastProcessedAt = Date.parse(String(lastProcessedResult.rows[0]?.processed_at || ''));
+                if (Number.isFinite(lastProcessedAt)) {
+                    const cooldownEnd = new Date(lastProcessedAt);
+                    cooldownEnd.setDate(cooldownEnd.getDate() + policy.cooldownDays);
+                    if (Date.now() < cooldownEnd.getTime()) {
+                        const daysRemaining = Math.max(
+                            1,
+                            Math.ceil((cooldownEnd.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+                        );
+                        throw new BadRequestError(`Withdrawal cooldown active. You can request again in ${daysRemaining} day(s).`);
+                    }
+                }
+            }
+        }
+
+        const startOfMonth = new Date();
+        startOfMonth.setDate(1);
+        startOfMonth.setHours(0, 0, 0, 0);
+        const monthlyCountResult = await db.execute({
+            sql: `SELECT COUNT(*) as total
+                  FROM withdrawals
+                  WHERE user_id = ? AND requested_at >= ?`,
+            args: [partnerId, startOfMonth.toISOString()],
+        });
+        const monthlyCount = Number(monthlyCountResult.rows[0]?.total || 0);
+        if (monthlyCount >= policy.maxPerMonth) {
+            throw new BadRequestError(`Maximum ${policy.maxPerMonth} withdrawals allowed per month. Limit reached.`);
+        }
+
+        const now = new Date().toISOString();
+        const id = randomUUID();
+        const txnId = randomUUID();
+        await withTransaction(async (tx) => {
+            const walletUpdate = await tx.execute({
+                sql: `UPDATE wallets
+                      SET cash_balance = cash_balance - ?, updated_at = ?
+                      WHERE user_id = ? AND cash_balance >= ?`,
+                args: [body.amount, now, partnerId, body.amount],
+            });
+            if (Number((walletUpdate as any).rowsAffected || 0) === 0) {
+                throw new BadRequestError('Insufficient cash balance');
+            }
+            await tx.execute({
+                sql: `INSERT INTO withdrawals (
+                        id, user_id, amount, method, status, bank_details, upi_id, requested_at
+                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                args: [
+                    id,
+                    partnerId,
+                    body.amount,
+                    body.method,
+                    'pending',
+                    body.bankDetails ? JSON.stringify(body.bankDetails) : null,
+                    body.upiId?.trim() || null,
+                    now,
+                ],
+            });
+            await tx.execute({
+                sql: `INSERT INTO transactions (
+                        id, user_id, type, amount, currency, status, description, source_txn_id, created_at
+                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                args: [
+                    txnId,
+                    partnerId,
+                    'WITHDRAWAL',
+                    -body.amount,
+                    'CASH',
+                    'PENDING',
+                    `Partner withdrawal request via ${body.method}`,
+                    id,
+                    now,
+                ],
+            });
+        });
+
+        return reply.status(201).send({ data: { id, status: 'pending', amount: body.amount } });
+    });
+
+    fastify.patch('/api/partner/withdrawals/:id/cancel', async (request) => {
+        const partnerId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const now = new Date().toISOString();
+        const data = await withTransaction(async (tx) => {
+            const existing = await tx.execute({
+                sql: 'SELECT id, user_id, amount, status FROM withdrawals WHERE id = ?',
+                args: [id],
+            });
+            if (existing.rows.length === 0) throw new NotFoundError('Withdrawal not found');
+            const row = existing.rows[0] as Record<string, any>;
+            if (String(row.user_id || '') !== partnerId) {
+                throw new ForbiddenError('You can only cancel your own withdrawal');
+            }
+            if (String(row.status || '') !== 'pending') {
+                throw new BadRequestError('Only pending withdrawals can be cancelled');
+            }
+            const amount = Number(row.amount || 0);
+            if (!Number.isFinite(amount) || amount <= 0) {
+                throw new BadRequestError('Invalid withdrawal amount');
+            }
+
+            await tx.execute({
+                sql: `UPDATE withdrawals
+                      SET status = ?, rejection_reason = ?, admin_notes = ?, processed_at = ?, processed_by = ?
+                      WHERE id = ?`,
+                args: ['rejected', 'Cancelled by user', 'Cancelled by user', now, partnerId, id],
+            });
+            await tx.execute({
+                sql: `UPDATE wallets
+                      SET cash_balance = cash_balance + ?, updated_at = ?
+                      WHERE user_id = ?`,
+                args: [amount, now, partnerId],
+            });
+            await tx.execute({
+                sql: `UPDATE transactions
+                      SET status = ?, description = ?
+                      WHERE source_txn_id = ? AND type = 'WITHDRAWAL'`,
+                args: ['FAILED', 'Withdrawal cancelled by user', id],
+            });
+            return { amount };
+        });
+        return { data: { updated: true, status: 'rejected', amount: data.amount } };
     });
 
     // Partner Products (explicit partner-scoped CRUD)

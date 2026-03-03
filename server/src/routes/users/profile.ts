@@ -4,16 +4,146 @@
  * 
  * PATCH  /api/users/me/profile   - Update own profile (safe fields)
  * POST   /api/users/me/kyc       - Submit KYC metadata
+ * PATCH  /api/users/me/password  - Change password (Firebase-backed)
  */
 
 import { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/client.js';
 import { requireAuth } from '../../middleware/auth.js';
+import { env } from '../../config/env.js';
+import { getAuth } from 'firebase-admin/auth';
 
 // Fields that users are allowed to self-update
 const SAFE_FIELDS = ['name', 'phone', 'photo_url', 'state', 'city'];
+const userSettingsKey = (uid: string) => `user_settings:${uid}`;
+
+type UserSettingsDto = {
+    taskReminders: boolean;
+    orderUpdates: boolean;
+    updatedAt?: string;
+    updatedBy?: string;
+};
+
+function normalizeUserSettings(value: unknown, updatedAt?: string, updatedBy?: string): UserSettingsDto {
+    let raw: Record<string, unknown> = {};
+    if (typeof value === 'string') {
+        try {
+            raw = JSON.parse(value) as Record<string, unknown>;
+        } catch {
+            raw = {};
+        }
+    }
+    return {
+        taskReminders: raw.taskReminders === undefined ? true : Boolean(raw.taskReminders),
+        orderUpdates: raw.orderUpdates === undefined ? true : Boolean(raw.orderUpdates),
+        updatedAt,
+        updatedBy,
+    };
+}
+
+function mapFirebasePasswordError(message: string): string {
+    const code = String(message || '').toUpperCase();
+    if (code.includes('INVALID_PASSWORD') || code.includes('INVALID_LOGIN_CREDENTIALS')) {
+        return 'Current password is incorrect';
+    }
+    if (code.includes('TOO_MANY_ATTEMPTS_TRY_LATER')) {
+        return 'Too many failed attempts. Please try again later.';
+    }
+    return 'Unable to verify current password';
+}
+
+async function verifyCurrentPasswordViaFirebase(email: string, currentPassword: string): Promise<void> {
+    const apiKey = env.FIREBASE_WEB_API_KEY;
+    if (!apiKey) {
+        const err = new Error('FIREBASE_WEB_API_KEY_NOT_CONFIGURED');
+        (err as any).code = 'FIREBASE_WEB_API_KEY_NOT_CONFIGURED';
+        throw err;
+    }
+
+    const response = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                email,
+                password: currentPassword,
+                returnSecureToken: false,
+            }),
+        }
+    );
+
+    if (!response.ok) {
+        let errorMessage = 'UNKNOWN';
+        try {
+            const body = await response.json() as any;
+            errorMessage = String(body?.error?.message || errorMessage);
+        } catch {
+            // Ignore parsing failures and use default message.
+        }
+        const err = new Error(errorMessage);
+        (err as any).code = 'FIREBASE_VERIFY_FAILED';
+        throw err;
+    }
+}
 
 export default async function profileWriteRoutes(fastify: FastifyInstance) {
+    fastify.get('/api/users/me/settings', { preHandler: [requireAuth] }, async (request) => {
+        const db = getDb();
+        const userId = request.user!.uid;
+        const result = await db.execute({
+            sql: `SELECT value, updated_at, updated_by FROM settings WHERE key = ?`,
+            args: [userSettingsKey(userId)],
+        });
+        const row = result.rows[0] as Record<string, any> | undefined;
+        return {
+            data: normalizeUserSettings(
+                row?.value,
+                row?.updated_at ? String(row.updated_at) : undefined,
+                row?.updated_by ? String(row.updated_by) : undefined
+            ),
+        };
+    });
+
+    fastify.patch('/api/users/me/settings', { preHandler: [requireAuth] }, async (request) => {
+        const db = getDb();
+        const userId = request.user!.uid;
+        const body = (request.body || {}) as Partial<UserSettingsDto>;
+
+        const currentRes = await db.execute({
+            sql: `SELECT value FROM settings WHERE key = ?`,
+            args: [userSettingsKey(userId)],
+        });
+        const current = normalizeUserSettings(currentRes.rows[0]?.value);
+        const next: UserSettingsDto = {
+            taskReminders:
+                body.taskReminders === undefined
+                    ? current.taskReminders
+                    : Boolean(body.taskReminders),
+            orderUpdates:
+                body.orderUpdates === undefined
+                    ? current.orderUpdates
+                    : Boolean(body.orderUpdates),
+        };
+        const now = new Date().toISOString();
+        await db.execute({
+            sql: `INSERT INTO settings (key, value, updated_at, updated_by)
+                  VALUES (?, ?, ?, ?)
+                  ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by`,
+            args: [userSettingsKey(userId), JSON.stringify(next), now, userId],
+        });
+
+        return {
+            data: {
+                ...next,
+                updatedAt: now,
+                updatedBy: userId,
+            },
+        };
+    });
 
     // ─── Update Own Profile ───────────────────────────────────────
     fastify.patch('/api/users/me/profile', { preHandler: [requireAuth] }, async (request, reply) => {
@@ -81,6 +211,67 @@ export default async function profileWriteRoutes(fastify: FastifyInstance) {
     });
 
     // ─── Submit KYC ───────────────────────────────────────────────
+    // --- Change Own Password ---
+    fastify.patch('/api/users/me/password', { preHandler: [requireAuth] }, async (request, reply) => {
+        const body = (request.body || {}) as {
+            currentPassword?: string;
+            newPassword?: string;
+        };
+
+        const currentPassword = String(body.currentPassword || '');
+        const newPassword = String(body.newPassword || '');
+
+        if (!currentPassword || !newPassword) {
+            return reply.status(400).send({
+                error: {
+                    code: 'VALIDATION_ERROR',
+                    message: 'currentPassword and newPassword are required',
+                },
+            });
+        }
+
+        if (newPassword.length < 6) {
+            return reply.status(400).send({
+                error: {
+                    code: 'VALIDATION_ERROR',
+                    message: 'newPassword must be at least 6 characters',
+                },
+            });
+        }
+
+        if (currentPassword === newPassword) {
+            return reply.status(400).send({
+                error: {
+                    code: 'VALIDATION_ERROR',
+                    message: 'New password must be different from current password',
+                },
+            });
+        }
+
+        try {
+            // If not configured, return 404 so existing client fallback can use Firebase SDK.
+            await verifyCurrentPasswordViaFirebase(request.user!.email, currentPassword);
+        } catch (err: any) {
+            if (String(err?.code || '') === 'FIREBASE_WEB_API_KEY_NOT_CONFIGURED') {
+                return reply.status(404).send({
+                    error: { code: 'NOT_FOUND', message: 'Password endpoint not configured' },
+                });
+            }
+
+            return reply.status(400).send({
+                error: {
+                    code: 'VALIDATION_ERROR',
+                    message: mapFirebasePasswordError(String(err?.message || '')),
+                },
+            });
+        }
+
+        await getAuth().updateUser(request.user!.uid, { password: newPassword });
+        await getAuth().revokeRefreshTokens(request.user!.uid);
+
+        return reply.send({ data: { updated: true } });
+    });
+
     fastify.post('/api/users/me/kyc', { preHandler: [requireAuth] }, async (request, reply) => {
         const db = getDb();
         const userId = request.user!.uid;

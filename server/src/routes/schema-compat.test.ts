@@ -171,6 +171,30 @@ describe('route/schema compatibility', () => {
         await app.close();
     });
 
+    it('product review compatibility route rejects when no matching user order exists', async () => {
+        const fakeDb = createFakeDb([
+            { rows: [] }, // lookup latest order for product
+        ]);
+        const app = await buildRouteApp('./reviews/writes.js', fakeDb);
+
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/products/p1/reviews',
+            payload: {
+                rating: 5,
+                title: 'Great',
+                content: '',
+            },
+        });
+
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({
+            error: { code: 'INVALID_ORDER' },
+        });
+
+        await app.close();
+    });
+
     it('review helpful route rejects duplicate helpful votes', async () => {
         const fakeDb = createFakeDb([
             { rows: [{ id: 'r1', helpful: 3 }] }, // review exists
@@ -242,6 +266,24 @@ describe('route/schema compatibility', () => {
         expect(bannersRes.statusCode).toBe(200);
         expect(bannersRes.json()).toMatchObject({
             data: [{ id: 'bn1', linkType: null, placement: null }],
+        });
+
+        await app.close();
+    });
+
+    it('password change endpoint returns 404 when server-side verification is not configured', async () => {
+        const fakeDb = createFakeDb([]);
+        const app = await buildRouteApp('./users/profile.js', fakeDb);
+
+        const res = await app.inject({
+            method: 'PATCH',
+            url: '/api/users/me/password',
+            payload: { currentPassword: 'old-pass', newPassword: 'new-pass-123' },
+        });
+
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toMatchObject({
+            error: { code: 'NOT_FOUND' },
         });
 
         await app.close();

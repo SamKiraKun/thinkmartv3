@@ -35,9 +35,30 @@ export default async function storageRoutes(fastify: FastifyInstance) {
             });
         }
 
+        const rawContentType = String(body.contentType || '').trim().toLowerCase();
+        const normalizedContentType = (() => {
+            switch (rawContentType) {
+                case 'image/jpg':
+                case 'image/pjpeg':
+                case 'image/jfif':
+                    return 'image/jpeg';
+                case 'application/x-pdf':
+                    return 'application/pdf';
+                default:
+                    return rawContentType;
+            }
+        })();
+
         // Security constraints on the MIME type
-        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
-        if (!allowedTypes.includes(body.contentType)) {
+        const allowedTypes = [
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+            'image/heic',
+            'image/heif',
+            'application/pdf',
+        ];
+        if (!allowedTypes.includes(normalizedContentType)) {
             return reply.status(400).send({
                 error: { code: 'INVALID_FILE_TYPE', message: 'File type not allowed' },
             });
@@ -61,12 +82,15 @@ export default async function storageRoutes(fastify: FastifyInstance) {
         const key = `users/${userId}/${folderName}/${uniqueName}`;
 
         try {
-            const { uploadUrl } = await generatePresignedUploadUrl(key, body.contentType);
+            const { uploadUrl, method, fields, publicUrl } = await generatePresignedUploadUrl(key, normalizedContentType);
 
             return {
                 data: {
                     uploadUrl,
                     key,
+                    method,
+                    fields,
+                    publicUrl
                 }
             };
         } catch (err) {

@@ -14,7 +14,7 @@ if (process.env.NODE_ENV !== 'production') {
 
 const envSchema = z.object({
     // Server
-    NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
+    NODE_ENV: z.enum(['development', 'staging', 'production', 'test']).default('development'),
     PORT: z.coerce.number().default(3001),
     HOST: z.string().default('0.0.0.0'),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
@@ -29,15 +29,13 @@ const envSchema = z.object({
     // Firebase Admin
     GOOGLE_APPLICATION_CREDENTIALS: z.string().optional(),
     FIREBASE_PROJECT_ID: z.string().optional(),
+    FIREBASE_WEB_API_KEY: z.string().optional(),
 
-    // Cloudflare R2
-    R2_ACCOUNT_ID: z.string().optional(),
-    R2_REGION: z.string().optional(),
-    R2_ENDPOINT: z.string().optional(),
-    R2_ACCESS_KEY_ID: z.string().optional(),
-    R2_SECRET_ACCESS_KEY: z.string().optional(),
-    R2_BUCKET_NAME: z.string().default('thinkmart-assets'),
-    R2_PUBLIC_URL: z.string().optional(),
+    // Cloudinary
+    CLOUDINARY_CLOUD_NAME: z.string().optional(),
+    CLOUDINARY_API_KEY: z.string().optional(),
+    CLOUDINARY_API_SECRET: z.string().optional(),
+    CLOUDINARY_UPLOAD_PRESET: z.string().optional(),
 
     // Typesense
     TYPESENSE_HOST: z.string().optional(),
@@ -50,7 +48,7 @@ const envSchema = z.object({
     FF_READ_API_ENABLED: z.coerce.boolean().default(true),
     FF_WRITE_API_ENABLED: z.coerce.boolean().default(true),
     FF_REALTIME_ENABLED: z.coerce.boolean().default(false),
-    FF_UPLOAD_R2_ENABLED: z.coerce.boolean().default(false),
+    FF_UPLOAD_CLOUDINARY_ENABLED: z.coerce.boolean().default(true),
     FF_JOBS_ENABLED: z.coerce.boolean().default(false),
 });
 

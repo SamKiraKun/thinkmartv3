@@ -1,8 +1,9 @@
 // File: server/src/routes/reviews/writes.ts
 /**
  * Review Write Routes (Wave 1 Writes)
- * 
+ *
  * POST   /api/reviews                  - Create a review
+ * POST   /api/products/:id/reviews     - Compatibility alias for product detail review submit
  * PATCH  /api/reviews/:id              - Update own review
  * DELETE /api/reviews/:id              - Delete own review
  * POST   /api/reviews/:id/helpful      - Mark review as helpful
@@ -15,8 +16,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { withTransaction } from '../../db/client.js';
 
 export default async function reviewWriteRoutes(fastify: FastifyInstance) {
-
-    // ─── Create Review ────────────────────────────────────────────
+    // Create Review
     fastify.post('/api/reviews', { preHandler: [requireAuth] }, async (request, reply) => {
         const db = getDb();
         const userId = request.user!.uid;
@@ -102,7 +102,7 @@ export default async function reviewWriteRoutes(fastify: FastifyInstance) {
             ],
         });
 
-        // Update review stats (async — non-blocking)
+        // Update review stats (async, non-blocking)
         updateReviewStats(db, body.productId).catch(err =>
             console.error('Failed to update review stats:', err)
         );
@@ -112,7 +112,118 @@ export default async function reviewWriteRoutes(fastify: FastifyInstance) {
         });
     });
 
-    // ─── Update Review ────────────────────────────────────────────
+    // Compatibility alias used by Flutter product detail submit action.
+    fastify.post('/api/products/:id/reviews', { preHandler: [requireAuth] }, async (request, reply) => {
+        const db = getDb();
+        const userId = request.user!.uid;
+        const { id: productId } = request.params as { id: string };
+
+        const body = request.body as {
+            orderId?: string;
+            rating?: number;
+            title?: string;
+            content?: string;
+            images?: string[];
+        };
+
+        const rating = Number(body.rating || 0);
+        if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+            return reply.status(400).send({
+                error: { code: 'VALIDATION_ERROR', message: 'Rating must be between 1 and 5' },
+            });
+        }
+
+        let orderId = String(body.orderId || '').trim();
+        if (!orderId) {
+            const latestOrder = await db.execute({
+                sql: `SELECT id FROM orders
+                      WHERE user_id = ? AND items LIKE ?
+                      ORDER BY created_at DESC
+                      LIMIT 1`,
+                args: [userId, `%${productId}%`],
+            });
+            orderId = String(latestOrder.rows[0]?.id || '').trim();
+        }
+
+        if (!orderId) {
+            return reply.status(400).send({
+                error: {
+                    code: 'INVALID_ORDER',
+                    message: 'No matching order found for this product. Please provide orderId.',
+                },
+            });
+        }
+
+        const normalizedContent =
+            String(body.content || '').trim() ||
+            String(body.title || '').trim() ||
+            'Review submitted from app';
+
+        const existing = await db.execute({
+            sql: 'SELECT id FROM reviews WHERE user_id = ? AND product_id = ?',
+            args: [userId, productId],
+        });
+        if (existing.rows.length > 0) {
+            return reply.status(409).send({
+                error: { code: 'ALREADY_EXISTS', message: 'You have already reviewed this product' },
+            });
+        }
+
+        const userResult = await db.execute({
+            sql: 'SELECT name, photo_url FROM users WHERE uid = ?',
+            args: [userId],
+        });
+        const userName = (userResult.rows[0]?.name as string) || 'Anonymous';
+        const userAvatar = (userResult.rows[0]?.photo_url as string | undefined) || null;
+
+        const orderResult = await db.execute({
+            sql: `SELECT id FROM orders WHERE id = ? AND user_id = ?`,
+            args: [orderId, userId],
+        });
+        if (orderResult.rows.length === 0) {
+            return reply.status(400).send({
+                error: { code: 'INVALID_ORDER', message: 'orderId must be one of your orders' },
+            });
+        }
+
+        const deliveredOrderResult = await db.execute({
+            sql: `SELECT id FROM orders WHERE id = ? AND user_id = ? AND status = 'delivered'`,
+            args: [orderId, userId],
+        });
+        const verified = deliveredOrderResult.rows.length > 0;
+
+        const id = randomUUID();
+        const now = new Date().toISOString();
+
+        await db.execute({
+            sql: `INSERT INTO reviews (id, product_id, user_id, order_id, rating, title, content, images, user_name, user_avatar, helpful, verified, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'approved', ?)`,
+            args: [
+                id,
+                productId,
+                userId,
+                orderId,
+                rating,
+                body.title || null,
+                normalizedContent,
+                body.images ? JSON.stringify(body.images) : null,
+                userName,
+                userAvatar,
+                verified ? 1 : 0,
+                now,
+            ],
+        });
+
+        updateReviewStats(db, productId).catch(err =>
+            console.error('Failed to update review stats:', err)
+        );
+
+        return reply.status(201).send({
+            data: { id, productId, rating, createdAt: now },
+        });
+    });
+
+    // Update Review
     fastify.patch('/api/reviews/:id', { preHandler: [requireAuth] }, async (request, reply) => {
         const db = getDb();
         const userId = request.user!.uid;
@@ -176,7 +287,7 @@ export default async function reviewWriteRoutes(fastify: FastifyInstance) {
         return { data: { updated: true } };
     });
 
-    // ─── Delete Review ────────────────────────────────────────────
+    // Delete Review
     fastify.delete('/api/reviews/:id', { preHandler: [requireAuth] }, async (request, reply) => {
         const db = getDb();
         const userId = request.user!.uid;
@@ -214,7 +325,7 @@ export default async function reviewWriteRoutes(fastify: FastifyInstance) {
         return { data: { deleted: true } };
     });
 
-    // ─── Mark Review as Helpful ───────────────────────────────────
+    // Mark Review as Helpful
     fastify.post('/api/reviews/:id/helpful', { preHandler: [requireAuth] }, async (request, reply) => {
         const db = getDb();
         const userId = request.user!.uid;
@@ -266,10 +377,10 @@ export default async function reviewWriteRoutes(fastify: FastifyInstance) {
     });
 }
 
-// ─── Helper: Update Review Stats ────────────────────────────────
+// Helper: Update Review Stats
 async function updateReviewStats(db: any, productId: string) {
     const stats = await db.execute({
-        sql: `SELECT 
+        sql: `SELECT
             COUNT(*) as total,
             COALESCE(AVG(rating), 0) as avg_rating,
             SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) as r1,

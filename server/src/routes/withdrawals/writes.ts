@@ -15,19 +15,57 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '../../utils/erro
 import { runIdempotentMutation } from '../../utils/idempotency.js';
 import { enqueueWithdrawalNotification } from '../../jobs/enqueue.js';
 import { broadcast } from '../realtime/index.js';
+import { distributePartnerCommissionsForCity } from '../../utils/partnerCommissions.js';
 
 type WithdrawalMethod = 'bank' | 'wallet' | 'upi';
 type WithdrawalAdminStatus = 'completed' | 'rejected';
 
-function parseMinWithdrawal(settingsValue: unknown): number {
-    if (typeof settingsValue !== 'string') return 500;
+type WithdrawalPolicy = {
+    minAmount: number;
+    maxAmount: number;
+    maxPerMonth: number;
+    cooldownDays: number;
+};
+
+function parseWithdrawalPolicy(settingsValue: unknown): WithdrawalPolicy {
+    const fallback: WithdrawalPolicy = {
+        minAmount: 500,
+        maxAmount: 50000,
+        maxPerMonth: 2,
+        cooldownDays: 24,
+    };
+    if (typeof settingsValue !== 'string') return fallback;
 
     try {
-        const parsed = JSON.parse(settingsValue) as { minWithdrawalAmount?: unknown };
-        const value = Number(parsed.minWithdrawalAmount);
-        return Number.isFinite(value) && value > 0 ? value : 500;
+        const parsed = JSON.parse(settingsValue) as Record<string, unknown>;
+
+        const minAmount = Number(parsed.minWithdrawalAmount);
+        const maxAmount = Number(parsed.maxWithdrawalAmount);
+        const maxPerMonth = Number(
+            parsed.maxWithdrawalsPerMonth ?? parsed.monthlyWithdrawalLimit
+        );
+        const cooldownDays = Number(parsed.withdrawalCooldownDays);
+
+        return {
+            minAmount:
+                Number.isFinite(minAmount) && minAmount > 0
+                    ? minAmount
+                    : fallback.minAmount,
+            maxAmount:
+                Number.isFinite(maxAmount) && maxAmount > 0
+                    ? maxAmount
+                    : fallback.maxAmount,
+            maxPerMonth:
+                Number.isFinite(maxPerMonth) && maxPerMonth > 0
+                    ? maxPerMonth
+                    : fallback.maxPerMonth,
+            cooldownDays:
+                Number.isFinite(cooldownDays) && cooldownDays >= 0
+                    ? cooldownDays
+                    : fallback.cooldownDays,
+        };
     } catch {
-        return 500;
+        return fallback;
     }
 }
 
@@ -82,10 +120,86 @@ export default async function withdrawalWriteRoutes(fastify: FastifyInstance) {
                 sql: `SELECT value FROM settings WHERE key = ?`,
                 args: ['general'],
             });
-            const minWithdrawal = parseMinWithdrawal(settings.rows[0]?.value);
+            const policy = parseWithdrawalPolicy(settings.rows[0]?.value);
 
-            if (body.amount < minWithdrawal) {
-                throw new BadRequestError(`Minimum withdrawal amount is ${minWithdrawal}`);
+            if (body.amount < policy.minAmount) {
+                throw new BadRequestError(`Minimum withdrawal amount is ${policy.minAmount}`);
+            }
+            if (body.amount > policy.maxAmount) {
+                throw new BadRequestError(`Maximum withdrawal amount is ${policy.maxAmount}`);
+            }
+
+            const userResult = await db.execute({
+                sql: `SELECT uid, kyc_status FROM users WHERE uid = ?`,
+                args: [userId],
+            });
+            if (userResult.rows.length === 0) {
+                throw new NotFoundError('User not found');
+            }
+
+            const kycStatus = String(userResult.rows[0]?.kyc_status || 'not_submitted');
+            if (kycStatus !== 'verified') {
+                throw new BadRequestError(
+                    'KYC verification required. Please complete your KYC to withdraw funds.'
+                );
+            }
+
+            const pendingResult = await db.execute({
+                sql: `SELECT id FROM withdrawals
+                      WHERE user_id = ? AND status = 'pending'
+                      LIMIT 1`,
+                args: [userId],
+            });
+            if (pendingResult.rows.length > 0) {
+                throw new BadRequestError(
+                    'You already have a pending withdrawal request. Please wait for it to be processed.'
+                );
+            }
+
+            if (policy.cooldownDays > 0) {
+                const lastProcessedResult = await db.execute({
+                    sql: `SELECT processed_at
+                          FROM withdrawals
+                          WHERE user_id = ?
+                            AND status IN ('completed', 'rejected')
+                            AND processed_at IS NOT NULL
+                          ORDER BY processed_at DESC
+                          LIMIT 1`,
+                    args: [userId],
+                });
+
+                if (lastProcessedResult.rows.length > 0) {
+                    const lastProcessedAt = Date.parse(String(lastProcessedResult.rows[0]?.processed_at || ''));
+                    if (Number.isFinite(lastProcessedAt)) {
+                        const cooldownEnd = new Date(lastProcessedAt);
+                        cooldownEnd.setDate(cooldownEnd.getDate() + policy.cooldownDays);
+                        if (Date.now() < cooldownEnd.getTime()) {
+                            const daysRemaining = Math.max(
+                                1,
+                                Math.ceil((cooldownEnd.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+                            );
+                            throw new BadRequestError(
+                                `Withdrawal cooldown active. You can request again in ${daysRemaining} day(s).`
+                            );
+                        }
+                    }
+                }
+            }
+
+            const startOfMonth = new Date();
+            startOfMonth.setDate(1);
+            startOfMonth.setHours(0, 0, 0, 0);
+            const monthlyCountResult = await db.execute({
+                sql: `SELECT COUNT(*) as total
+                      FROM withdrawals
+                      WHERE user_id = ? AND requested_at >= ?`,
+                args: [userId, startOfMonth.toISOString()],
+            });
+            const monthlyCount = Number(monthlyCountResult.rows[0]?.total || 0);
+            if (monthlyCount >= policy.maxPerMonth) {
+                throw new BadRequestError(
+                    `Maximum ${policy.maxPerMonth} withdrawals allowed per month. Limit reached.`
+                );
             }
 
             const now = new Date().toISOString();
@@ -375,6 +489,23 @@ export default async function withdrawalWriteRoutes(fastify: FastifyInstance) {
                               WHERE source_txn_id = ? AND type = 'WITHDRAWAL'`,
                         args: ['COMPLETED', id],
                     });
+
+                    const sourceUser = await tx.execute({
+                        sql: 'SELECT city FROM users WHERE uid = ?',
+                        args: [withdrawal.user_id],
+                    });
+                    const sourceCity = String(sourceUser.rows[0]?.city || '').trim();
+                    if (sourceCity) {
+                        await distributePartnerCommissionsForCity({
+                            tx: tx as any,
+                            city: sourceCity,
+                            sourceAmount: amount,
+                            sourceType: 'withdrawal',
+                            sourceId: id,
+                            sourceUserId: String(withdrawal.user_id),
+                            createdAt: now,
+                        });
+                    }
                 }
 
                 await tx.execute({

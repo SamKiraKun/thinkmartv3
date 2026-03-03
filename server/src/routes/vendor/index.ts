@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { getDb } from '../../db/client.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { paginatedResponse } from '../../utils/pagination.js';
+import { randomUUID } from 'crypto';
+import { BadRequestError, NotFoundError } from '../../utils/errors.js';
 
 type JsonObject = Record<string, any>;
 
@@ -30,6 +32,29 @@ function normalizeStatus(status: string): string {
     if (['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'].includes(s)) return s;
     if (s === 'refunded') return 'cancelled';
     return 'pending';
+}
+
+function mapVendorProductRow(row: Record<string, any>) {
+    const images = parseJson<string[]>(row.images, []);
+    return {
+        id: String(row.id),
+        name: String(row.name || ''),
+        description: String(row.description || ''),
+        price: Number(row.price || 0),
+        category: String(row.category || 'general'),
+        image: String(row.image || images[0] || ''),
+        images,
+        status: String(row.status || 'pending'),
+        stock: Number(row.stock || 0),
+        inStock: Boolean(row.in_stock),
+        coinPrice: Number(row.coin_price || 0),
+        commission: Number(row.commission || 0),
+        coinOnly: Boolean(row.coin_only),
+        cashOnly: Boolean(row.cash_only),
+        deliveryDays: Number(row.delivery_days || 7),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+    };
 }
 
 async function buildProductMap(productIds: string[]): Promise<Map<string, Record<string, any>>> {
@@ -288,6 +313,182 @@ export default async function vendorRoutes(fastify: FastifyInstance) {
                 },
             },
         };
+    });
+
+    fastify.get('/api/vendor/products', async (request) => {
+        const db = getDb();
+        const vendorId = request.user!.uid;
+        const query = request.query as Record<string, string>;
+        const page = Math.max(1, Number.parseInt(query.page || '1', 10));
+        const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit || '30', 10)));
+        const offset = (page - 1) * limit;
+        const status = String(query.status || '').trim();
+        const category = String(query.category || '').trim();
+        const search = String(query.search || '').trim();
+
+        const conditions = ['vendor = ?'];
+        const params: any[] = [vendorId];
+        if (status) {
+            conditions.push('COALESCE(status, ?) = ?');
+            params.push('pending', status);
+        }
+        if (category) {
+            conditions.push('category = ?');
+            params.push(category);
+        }
+        if (search) {
+            const term = `%${search}%`;
+            conditions.push('(name LIKE ? OR description LIKE ?)');
+            params.push(term, term);
+        }
+        const where = `WHERE ${conditions.join(' AND ')}`;
+
+        const countRes = await db.execute({
+            sql: `SELECT COUNT(*) as total FROM products ${where}`,
+            args: params,
+        });
+        const total = Number(countRes.rows[0]?.total || 0);
+
+        const rowsRes = await db.execute({
+            sql: `SELECT *
+                  FROM products
+                  ${where}
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT ? OFFSET ?`,
+            args: [...params, limit, offset],
+        });
+
+        return paginatedResponse(
+            (rowsRes.rows as Array<Record<string, any>>).map(mapVendorProductRow),
+            total,
+            page,
+            limit
+        );
+    });
+
+    fastify.post('/api/vendor/products', async (request, reply) => {
+        const db = getDb();
+        const vendorId = request.user!.uid;
+        const body = (request.body || {}) as Record<string, any>;
+        const name = String(body.name || '').trim();
+        const price = Number(body.price || 0);
+        const category = String(body.category || '').trim();
+
+        if (!name) throw new BadRequestError('name is required');
+        if (!Number.isFinite(price) || price <= 0) throw new BadRequestError('price must be positive');
+        if (!category) throw new BadRequestError('category is required');
+
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        await db.execute({
+            sql: `INSERT INTO products (
+                    id, name, description, price, category, image, images,
+                    commission, coin_price, in_stock, stock, badges,
+                    coin_only, cash_only, delivery_days, vendor, status,
+                    moderation_reason, moderated_at, moderated_by, created_at, updated_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+                id,
+                name,
+                String(body.description || '').trim(),
+                price,
+                category,
+                String(body.image || '').trim(),
+                Array.isArray(body.images) ? JSON.stringify(body.images) : null,
+                Number(body.commission || 0),
+                Number(body.coinPrice || 0),
+                body.isActive !== undefined
+                    ? (body.isActive ? 1 : 0)
+                    : body.stock !== undefined
+                        ? (Number(body.stock || 0) > 0 ? 1 : 0)
+                        : 1,
+                Number(body.stock || 0),
+                Array.isArray(body.badges) ? JSON.stringify(body.badges) : null,
+                body.coinOnly ? 1 : 0,
+                body.cashOnly ? 1 : 0,
+                Number(body.deliveryDays || 7),
+                vendorId,
+                'pending',
+                null,
+                null,
+                null,
+                now,
+                now,
+            ],
+        });
+
+        return reply.status(201).send({
+            data: {
+                id,
+                status: 'pending',
+                createdAt: now,
+            },
+        });
+    });
+
+    fastify.patch('/api/vendor/products/:id', async (request) => {
+        const db = getDb();
+        const vendorId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const existing = await db.execute({
+            sql: 'SELECT id FROM products WHERE id = ? AND vendor = ?',
+            args: [id, vendorId],
+        });
+        if (existing.rows.length === 0) throw new NotFoundError('Product not found');
+
+        const body = (request.body || {}) as Record<string, any>;
+        const updates: string[] = [];
+        const args: any[] = [];
+        const fieldMap: Record<string, string> = {
+            name: 'name',
+            description: 'description',
+            price: 'price',
+            category: 'category',
+            image: 'image',
+            commission: 'commission',
+            coinPrice: 'coin_price',
+            stock: 'stock',
+            deliveryDays: 'delivery_days',
+        };
+
+        for (const [key, col] of Object.entries(fieldMap)) {
+            if (body[key] !== undefined) {
+                updates.push(`${col} = ?`);
+                args.push(body[key]);
+            }
+        }
+        if (body.inStock !== undefined) { updates.push('in_stock = ?'); args.push(body.inStock ? 1 : 0); }
+        if (body.isActive !== undefined) { updates.push('in_stock = ?'); args.push(body.isActive ? 1 : 0); }
+        if (body.coinOnly !== undefined) { updates.push('coin_only = ?'); args.push(body.coinOnly ? 1 : 0); }
+        if (body.cashOnly !== undefined) { updates.push('cash_only = ?'); args.push(body.cashOnly ? 1 : 0); }
+        if (body.images !== undefined) { updates.push('images = ?'); args.push(JSON.stringify(body.images)); }
+        if (body.badges !== undefined) { updates.push('badges = ?'); args.push(JSON.stringify(body.badges)); }
+
+        if (updates.length === 0) throw new BadRequestError('No fields to update');
+        updates.push('updated_at = ?');
+        args.push(new Date().toISOString());
+        args.push(id);
+        args.push(vendorId);
+
+        await db.execute({
+            sql: `UPDATE products SET ${updates.join(', ')} WHERE id = ? AND vendor = ?`,
+            args,
+        });
+        return { data: { updated: true } };
+    });
+
+    fastify.delete('/api/vendor/products/:id', async (request) => {
+        const db = getDb();
+        const vendorId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const result = await db.execute({
+            sql: 'DELETE FROM products WHERE id = ? AND vendor = ?',
+            args: [id, vendorId],
+        });
+        if (Number((result as any).rowsAffected || 0) === 0) {
+            throw new NotFoundError('Product not found');
+        }
+        return { data: { deleted: true } };
     });
 
     fastify.get('/api/vendor/store-profile', async (request) => {
