@@ -168,5 +168,84 @@ describe('role parity extension routes', () => {
 
     await app.close();
   });
-});
 
+  it('partner can update scoped user KYC status', async () => {
+    const fakeDb = createFakeDb([
+      { rows: [{ partner_config: JSON.stringify({ assignedCities: ['Delhi'] }) }] },
+      {
+        rows: [
+          {
+            uid: 'u_city_1',
+            role: 'user',
+            city: 'Delhi',
+            name: 'Alice',
+            email: 'alice@example.com',
+            phone: '9000000000',
+          },
+        ],
+      },
+      { rows: [], rowsAffected: 1 }, // update user
+      { rows: [], rowsAffected: 1 }, // audit log insert
+    ]);
+
+    const app = await buildRouteApp('./partner/index.js', fakeDb, {
+      userOverrides: { role: 'partner' },
+    });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/partner/users/u_city_1/kyc-status',
+      payload: { kycStatus: 'verified', note: 'Docs validated' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      data: {
+        updated: true,
+        id: 'u_city_1',
+        kycStatus: 'verified',
+      },
+    });
+    expect(fakeDb.calls[2].sql).toContain('SET kyc_status = ?');
+    expect(fakeDb.calls[2].args[0]).toBe('verified');
+
+    await app.close();
+  });
+
+  it('organization can create payout withdrawal request from earnings module', async () => {
+    const fakeDb = createFakeDb([
+      { rows: [{ value: JSON.stringify({ minWithdrawalAmount: 500, maxWithdrawalAmount: 50000, maxWithdrawalsPerMonth: 2, withdrawalCooldownDays: 0 }) }] },
+      { rows: [{ uid: 'u1', role: 'organization', kyc_status: 'verified' }] },
+      { rows: [] }, // no pending withdrawal
+      { rows: [{ total: 0 }] }, // monthly count
+      { rows: [], rowsAffected: 1 }, // wallet debit
+      { rows: [], rowsAffected: 1 }, // withdrawals insert
+      { rows: [], rowsAffected: 1 }, // transactions insert
+    ]);
+
+    const app = await buildRouteApp('./organizations/index.js', fakeDb, {
+      userOverrides: { role: 'organization' },
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/organizations/me/earnings/withdrawals',
+      payload: {
+        amount: 1500,
+        method: 'upi',
+        upiId: 'org@upi',
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({
+      data: {
+        status: 'pending',
+        amount: 1500,
+      },
+    });
+    expect(fakeDb.calls.some((c) => c.sql.includes('INSERT INTO withdrawals'))).toBe(true);
+
+    await app.close();
+  });
+});

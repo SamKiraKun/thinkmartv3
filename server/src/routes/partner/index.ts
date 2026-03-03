@@ -144,6 +144,44 @@ function parseWithdrawalPolicy(settingsValue: unknown): WithdrawalPolicy {
     }
 }
 
+async function loadPartnerAssignedCities(db: ReturnType<typeof getDb>, partnerId: string): Promise<string[]> {
+    const partnerRes = await db.execute({
+        sql: 'SELECT partner_config FROM users WHERE uid = ?',
+        args: [partnerId],
+    });
+    const { cities } = partnerCitiesAndPercentages(partnerRes.rows[0]?.partner_config);
+    return cities;
+}
+
+async function loadPartnerManagedUser(params: {
+    db: ReturnType<typeof getDb>;
+    partnerId: string;
+    userId: string;
+}) {
+    const { db, partnerId, userId } = params;
+    const cities = await loadPartnerAssignedCities(db, partnerId);
+    if (cities.length === 0) {
+        throw new ForbiddenError('No cities are assigned to this partner');
+    }
+
+    const cityWhere = inClause('city', cities);
+    const userRes = await db.execute({
+        sql: `SELECT uid, role, name, email, phone, city, kyc_status, membership_active, is_active, is_banned, created_at, updated_at
+              FROM users
+              WHERE uid = ? AND ${cityWhere.sql}
+              LIMIT 1`,
+        args: [userId, ...cityWhere.args],
+    });
+    if (userRes.rows.length === 0) {
+        throw new NotFoundError('User not found in assigned partner cities');
+    }
+    const row = userRes.rows[0] as Record<string, any>;
+    if (String(row.role || '').toLowerCase() !== 'user') {
+        throw new ForbiddenError('Only end users can be managed from partner users module');
+    }
+    return row;
+}
+
 function mapProductRow(row: Record<string, any>) {
     return {
         id: row.id,
@@ -255,11 +293,7 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
         const kycStatus = String(query.kycStatus || '').trim();
         const search = String(query.search || '').trim();
 
-        const partnerRes = await db.execute({
-            sql: 'SELECT partner_config FROM users WHERE uid = ?',
-            args: [partnerId],
-        });
-        const { cities } = partnerCitiesAndPercentages(partnerRes.rows[0]?.partner_config);
+        const cities = await loadPartnerAssignedCities(db, partnerId);
         if (cities.length === 0) return paginatedResponse([], 0, page, limit);
 
         const cityWhere = inClause('city', cities);
@@ -288,7 +322,7 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
         const total = Number(countRes.rows[0]?.total || 0);
 
         const result = await db.execute({
-            sql: `SELECT uid, name, phone, email, city, kyc_status, membership_active, created_at, updated_at
+            sql: `SELECT uid, name, phone, email, city, kyc_status, membership_active, is_active, is_banned, created_at, updated_at
                   FROM users ${where}
                   ORDER BY created_at DESC, uid DESC
                   LIMIT ? OFFSET ?`,
@@ -303,10 +337,199 @@ export default async function partnerRoutes(fastify: FastifyInstance) {
             city: row.city || '',
             kycStatus: row.kyc_status || 'not_submitted',
             membershipActive: Boolean(row.membership_active),
+            accountStatus: Boolean(row.is_banned) ? 'suspended' : (Boolean(row.is_active) ? 'active' : 'pending'),
             createdAt: row.created_at,
             lastActiveAt: row.updated_at,
         }));
         return paginatedResponse(data, total, page, limit);
+    });
+
+    fastify.get('/api/partner/users/:id', async (request) => {
+        const db = getDb();
+        const partnerId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const user = await loadPartnerManagedUser({ db, partnerId, userId: id });
+
+        const [walletRes, orderStatsRes, withdrawalStatsRes] = await Promise.all([
+            db.execute({
+                sql: `SELECT coin_balance, cash_balance FROM wallets WHERE user_id = ?`,
+                args: [id],
+            }),
+            db.execute({
+                sql: `SELECT COUNT(*) as total, COALESCE(SUM(cash_paid), 0) as total_spend
+                      FROM orders
+                      WHERE user_id = ?`,
+                args: [id],
+            }),
+            db.execute({
+                sql: `SELECT COUNT(*) as count_total, COALESCE(SUM(amount), 0) as amount_total
+                      FROM withdrawals
+                      WHERE user_id = ?`,
+                args: [id],
+            }),
+        ]);
+
+        return {
+            data: {
+                id: user.uid,
+                name: user.name || 'User',
+                email: user.email || '',
+                phone: user.phone || '',
+                city: user.city || '',
+                role: user.role,
+                kycStatus: user.kyc_status || 'not_submitted',
+                membershipActive: Boolean(user.membership_active),
+                accountStatus: Boolean(user.is_banned) ? 'suspended' : (Boolean(user.is_active) ? 'active' : 'pending'),
+                createdAt: user.created_at,
+                updatedAt: user.updated_at,
+                wallet: {
+                    coinBalance: Number(walletRes.rows[0]?.coin_balance || 0),
+                    cashBalance: Number(walletRes.rows[0]?.cash_balance || 0),
+                },
+                stats: {
+                    orderCount: Number(orderStatsRes.rows[0]?.total || 0),
+                    totalSpend: Number(orderStatsRes.rows[0]?.total_spend || 0),
+                    withdrawalCount: Number(withdrawalStatsRes.rows[0]?.count_total || 0),
+                    withdrawalsTotal: Number(withdrawalStatsRes.rows[0]?.amount_total || 0),
+                },
+            },
+        };
+    });
+
+    fastify.patch('/api/partner/users/:id/kyc-status', async (request) => {
+        const db = getDb();
+        const partnerId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const body = (request.body || {}) as { kycStatus?: string; note?: string };
+        const kycStatus = String(body.kycStatus || '').trim().toLowerCase();
+        if (!['not_submitted', 'pending', 'verified', 'rejected'].includes(kycStatus)) {
+            throw new BadRequestError('kycStatus must be one of: not_submitted, pending, verified, rejected');
+        }
+
+        await loadPartnerManagedUser({ db, partnerId, userId: id });
+        const now = new Date().toISOString();
+        await db.execute({
+            sql: `UPDATE users
+                  SET kyc_status = ?, updated_at = ?
+                  WHERE uid = ?`,
+            args: [kycStatus, now, id],
+        });
+        await db.execute({
+            sql: `INSERT INTO audit_logs (
+                    id, actor_uid, action, target_type, target_id, details, ip_address, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+                randomUUID(),
+                partnerId,
+                'partner.user_kyc_update',
+                'user',
+                id,
+                JSON.stringify({
+                    kycStatus,
+                    note: String(body.note || '').trim() || null,
+                }),
+                request.ip,
+                now,
+            ],
+        });
+        return {
+            data: {
+                updated: true,
+                id,
+                kycStatus,
+            },
+        };
+    });
+
+    fastify.patch('/api/partner/users/:id/membership', async (request) => {
+        const db = getDb();
+        const partnerId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const body = (request.body || {}) as { membershipActive?: boolean; note?: string };
+        if (typeof body.membershipActive !== 'boolean') {
+            throw new BadRequestError('membershipActive must be a boolean');
+        }
+        await loadPartnerManagedUser({ db, partnerId, userId: id });
+
+        const now = new Date().toISOString();
+        await db.execute({
+            sql: `UPDATE users
+                  SET membership_active = ?, updated_at = ?
+                  WHERE uid = ?`,
+            args: [body.membershipActive ? 1 : 0, now, id],
+        });
+        await db.execute({
+            sql: `INSERT INTO audit_logs (
+                    id, actor_uid, action, target_type, target_id, details, ip_address, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+                randomUUID(),
+                partnerId,
+                'partner.user_membership_update',
+                'user',
+                id,
+                JSON.stringify({
+                    membershipActive: body.membershipActive,
+                    note: String(body.note || '').trim() || null,
+                }),
+                request.ip,
+                now,
+            ],
+        });
+        return {
+            data: {
+                updated: true,
+                id,
+                membershipActive: body.membershipActive,
+            },
+        };
+    });
+
+    fastify.patch('/api/partner/users/:id/status', async (request) => {
+        const db = getDb();
+        const partnerId = request.user!.uid;
+        const { id } = request.params as { id: string };
+        const body = (request.body || {}) as { status?: string; note?: string };
+        const status = String(body.status || '').trim().toLowerCase();
+        if (!['active', 'suspended', 'pending'].includes(status)) {
+            throw new BadRequestError('status must be active, suspended, or pending');
+        }
+        await loadPartnerManagedUser({ db, partnerId, userId: id });
+
+        const isBanned = status === 'suspended' ? 1 : 0;
+        const isActive = status === 'pending' ? 0 : 1;
+        const now = new Date().toISOString();
+        await db.execute({
+            sql: `UPDATE users
+                  SET is_banned = ?, is_active = ?, updated_at = ?
+                  WHERE uid = ?`,
+            args: [isBanned, isActive, now, id],
+        });
+        await db.execute({
+            sql: `INSERT INTO audit_logs (
+                    id, actor_uid, action, target_type, target_id, details, ip_address, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+                randomUUID(),
+                partnerId,
+                'partner.user_status_update',
+                'user',
+                id,
+                JSON.stringify({
+                    status,
+                    note: String(body.note || '').trim() || null,
+                }),
+                request.ip,
+                now,
+            ],
+        });
+        return {
+            data: {
+                updated: true,
+                id,
+                status,
+            },
+        };
     });
 
     fastify.get('/api/partner/analytics', async (request) => {

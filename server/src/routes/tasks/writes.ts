@@ -28,6 +28,9 @@ type TaskIntegrity = {
     answerCount?: number;
     questionCount?: number;
     client?: string;
+    sessionNonce?: string;
+    openedHost?: string;
+    openAttempts?: number;
 };
 
 function parseNonNegativeInt(value: unknown): number | null {
@@ -58,6 +61,51 @@ function parseBoolean(value: unknown, fallback = false): boolean {
     return fallback;
 }
 
+function parseJsonObject(value: unknown): Record<string, unknown> {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) {
+        return value as Record<string, unknown>;
+    }
+    if (typeof value !== 'string') return {};
+    try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed as Record<string, unknown>;
+        }
+        return {};
+    } catch {
+        return {};
+    }
+}
+
+function normalizeHost(value: unknown): string | undefined {
+    const raw = String(value || '').trim();
+    if (!raw) return undefined;
+
+    const tryUrls = raw.startsWith('http://') || raw.startsWith('https://')
+        ? [raw]
+        : [`https://${raw}`];
+    for (const candidate of tryUrls) {
+        try {
+            const host = new URL(candidate).hostname.trim().toLowerCase();
+            if (host) return host;
+        } catch {
+            // no-op
+        }
+    }
+    return undefined;
+}
+
+function resolveTaskContentHost(task: TaskRow): string | undefined {
+    const directUrl = String(task.embed_url || task.embedUrl || task.video_url || task.videoUrl || task.url || '').trim();
+    if (directUrl) {
+        return normalizeHost(directUrl);
+    }
+
+    const config = parseJsonObject(task.config);
+    return normalizeHost(config.videoUrl || config.embedUrl || config.url);
+}
+
 function normalizeIntegrity(raw: unknown): TaskIntegrity | undefined {
     if (raw == null) return undefined;
     if (typeof raw !== 'object' || Array.isArray(raw)) {
@@ -69,7 +117,12 @@ function normalizeIntegrity(raw: unknown): TaskIntegrity | undefined {
     const backgroundSeconds = parseNonNegativeInt(input.backgroundSeconds) ?? 0;
     const answerCount = parseNonNegativeInt(input.answerCount);
     const questionCount = parseNonNegativeInt(input.questionCount);
+    const openAttempts = parseNonNegativeInt(input.openAttempts);
     const client = typeof input.client === 'string' ? input.client.trim().slice(0, 64) : undefined;
+    const sessionNonce = typeof input.sessionNonce === 'string'
+        ? input.sessionNonce.trim().slice(0, 128)
+        : undefined;
+    const openedHost = normalizeHost(input.openedHost);
 
     return {
         activeSeconds,
@@ -77,7 +130,10 @@ function normalizeIntegrity(raw: unknown): TaskIntegrity | undefined {
         contentOpened: parseBoolean(input.contentOpened, false),
         ...(answerCount != null ? { answerCount } : {}),
         ...(questionCount != null ? { questionCount } : {}),
+        ...(openAttempts != null ? { openAttempts } : {}),
         ...(client ? { client } : {}),
+        ...(sessionNonce ? { sessionNonce } : {}),
+        ...(openedHost ? { openedHost } : {}),
     };
 }
 
@@ -177,7 +233,7 @@ async function validateAndFinalizeSession(params: {
     }
 
     const sessionResult = await tx.execute({
-        sql: `SELECT id, task_id, status, started_at
+        sql: `SELECT id, task_id, status, started_at, payload
               FROM task_sessions
               WHERE id = ? AND user_id = ?`,
         args: [sessionId, userId],
@@ -194,6 +250,13 @@ async function validateAndFinalizeSession(params: {
     const status = String(session.status || '').toLowerCase();
     if (['completed', 'rewarded', 'survey_submitted'].includes(status)) {
         throw new ConflictError('Task session already completed');
+    }
+    const sessionPayload = parseJsonObject(session.payload);
+    const sessionNonce = String(sessionPayload.integrityNonce || '').trim();
+    if (sessionNonce) {
+        if (!integrity || String(integrity.sessionNonce || '').trim() !== sessionNonce) {
+            throw new ConflictError('Task session integrity token mismatch');
+        }
     }
 
     const minDuration = Number(task.min_duration || 0);
@@ -212,12 +275,36 @@ async function validateAndFinalizeSession(params: {
         if (minDuration > 0 && integrity.activeSeconds + 1 < minDuration) {
             throw new ConflictError(`Task requires at least ${minDuration}s of active time`);
         }
+        if (integrity.backgroundSeconds > 300) {
+            throw new ConflictError('Task invalidated due to excessive background time');
+        }
+
+        const expectedHost = resolveTaskContentHost(task);
+        const taskNeedsContentHost =
+            ['VIDEO', 'WATCH_VIDEO', 'WEBSITE'].includes(taskType) &&
+            Boolean(expectedHost) &&
+            integrity.contentOpened === true;
+        if (taskNeedsContentHost && !integrity.openedHost) {
+            throw new ConflictError('Task content host verification missing');
+        }
+        if (taskNeedsContentHost && expectedHost && integrity.openedHost !== expectedHost) {
+            throw new ConflictError('Task content host verification failed');
+        }
 
         if (taskType === 'VIDEO' || taskType === 'WATCH_VIDEO') {
             if (!integrity.contentOpened) {
                 throw new ConflictError('Open video content before claiming reward');
             }
             if (integrity.backgroundSeconds > 120) {
+                throw new ConflictError('Task invalidated due to long background time');
+            }
+        }
+
+        if (taskType === 'WEBSITE') {
+            if (!integrity.contentOpened) {
+                throw new ConflictError('Open task content before claiming reward');
+            }
+            if (integrity.backgroundSeconds > 180) {
                 throw new ConflictError('Task invalidated due to long background time');
             }
         }
@@ -236,10 +323,10 @@ async function validateAndFinalizeSession(params: {
         }
     }
 
-    const payloadObject: Record<string, unknown> = {};
+    const payloadObject: Record<string, unknown> = { ...sessionPayload };
     if (answers) payloadObject.answers = answers;
     if (integrity) payloadObject.integrity = integrity;
-    const payload = Object.keys(payloadObject).length > 0 ? JSON.stringify(payloadObject) : null;
+    const payload = JSON.stringify(payloadObject);
 
     await tx.execute({
         sql: `UPDATE task_sessions
@@ -396,7 +483,7 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
         );
 
         const existingSession = await db.execute({
-            sql: `SELECT id, started_at
+            sql: `SELECT id, started_at, payload
                   FROM task_sessions
                   WHERE user_id = ? AND task_id = ? AND status IN ('started', 'in_progress')
                   ORDER BY started_at DESC
@@ -405,22 +492,42 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
         });
         if (existingSession.rows.length > 0) {
             const current = existingSession.rows[0] as Record<string, any>;
+            const currentPayload = parseJsonObject(current.payload);
+            let integrityNonce = String(currentPayload.integrityNonce || '').trim();
+            if (!integrityNonce) {
+                integrityNonce = randomUUID();
+                const nextPayload = JSON.stringify({
+                    ...currentPayload,
+                    integrityNonce,
+                    refreshedAt: new Date().toISOString(),
+                });
+                await db.execute({
+                    sql: `UPDATE task_sessions SET payload = ? WHERE id = ? AND user_id = ?`,
+                    args: [nextPayload, String(current.id), userId],
+                });
+            }
             return reply.status(200).send({
                 data: {
                     sessionId: String(current.id),
                     taskId,
                     startedAt: String(current.started_at || new Date().toISOString()),
                     reused: true,
+                    integrityNonce,
                 },
             });
         }
 
         const sessionId = randomUUID();
+        const integrityNonce = randomUUID();
         const now = new Date().toISOString();
+        const payload = JSON.stringify({
+            integrityNonce,
+            issuedAt: now,
+        });
         await db.execute({
-            sql: `INSERT INTO task_sessions (id, user_id, task_id, status, started_at)
-                  VALUES (?, ?, ?, 'started', ?)`,
-            args: [sessionId, userId, taskId, now],
+            sql: `INSERT INTO task_sessions (id, user_id, task_id, status, started_at, payload)
+                  VALUES (?, ?, ?, 'started', ?, ?)`,
+            args: [sessionId, userId, taskId, now, payload],
         });
 
         return reply.status(201).send({
@@ -429,6 +536,7 @@ export default async function taskWriteRoutes(fastify: FastifyInstance) {
                 taskId,
                 startedAt: now,
                 minDuration: Number(task.min_duration || 0),
+                integrityNonce,
             },
         });
     });

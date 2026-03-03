@@ -10,6 +10,10 @@ async function importStorageModule() {
 describe('storage utils', () => {
     beforeEach(() => {
         process.env = { ...ORIGINAL_ENV };
+        delete process.env.CLOUDINARY_CLOUD_NAME;
+        delete process.env.CLOUDINARY_API_KEY;
+        delete process.env.CLOUDINARY_API_SECRET;
+        delete process.env.CLOUDINARY_UPLOAD_PRESET;
         delete process.env.R2_ENDPOINT;
         delete process.env.R2_ACCESS_KEY_ID;
         delete process.env.R2_SECRET_ACCESS_KEY;
@@ -22,31 +26,31 @@ describe('storage utils', () => {
         process.env = { ...ORIGINAL_ENV };
     });
 
-    it('returns a mock presigned URL in development when R2 is not configured', async () => {
+    it('returns a mock upload URL in development when Cloudinary is not configured', async () => {
         process.env.NODE_ENV = 'development';
         const { generatePresignedUploadUrl } = await importStorageModule();
 
         const result = await generatePresignedUploadUrl('users/u1/file.png', 'image/png');
 
         expect(result.key).toBe('users/u1/file.png');
-        expect(result.uploadUrl).toContain('/api/mock-upload?key=');
+        expect(result.uploadUrl).toBe('http://localhost:3001/api/mock-upload');
+        expect(result.publicUrl).toBe('https://pub-mock-thinkmart.cloudinary.test/users/u1/file.png');
     });
 
-    it('throws in production when R2 is not configured', async () => {
+    it('throws in production when Cloudinary is not configured', async () => {
         process.env.NODE_ENV = 'production';
         const { generatePresignedUploadUrl } = await importStorageModule();
 
         await expect(
             generatePresignedUploadUrl('users/u1/file.png', 'image/png')
-        ).rejects.toThrow('R2 storage is not configured');
+        ).rejects.toThrow('Cloudinary storage is not configured for this environment');
     });
 
-    it('builds public URLs from R2_PUBLIC_URL without duplicate slashes', async () => {
-        process.env.R2_PUBLIC_URL = 'https://cdn.thinkmart.com/';
+    it('builds mock public URLs when Cloudinary is not configured', async () => {
         const { getPublicUrl } = await importStorageModule();
 
         expect(getPublicUrl('products/p1/img.webp')).toBe(
-            'https://cdn.thinkmart.com/products/p1/img.webp'
+            'https://pub-mock-thinkmart.cloudinary.test/products/p1/img.webp'
         );
     });
 });

@@ -254,6 +254,67 @@ describe('route/schema compatibility', () => {
         await app.close();
     });
 
+    it('task completion rejects when session integrity nonce does not match', async () => {
+        const fakeDb = createFakeDb([
+            {
+                rows: [
+                    {
+                        id: 't_video_nonce',
+                        type: 'WATCH_VIDEO',
+                        is_active: 1,
+                        frequency: 'ONCE',
+                        reward: 5,
+                        reward_type: 'COIN',
+                        max_completions_per_day: null,
+                        min_duration: 0,
+                        video_url: 'https://videos.example.com/watch/1',
+                    },
+                ],
+            },
+            { rows: [] }, // no existing completion
+            {
+                rows: [
+                    {
+                        id: 'session_nonce_1',
+                        task_id: 't_video_nonce',
+                        status: 'started',
+                        started_at: new Date(Date.now() - 60_000).toISOString(),
+                        payload: JSON.stringify({ integrityNonce: 'nonce_expected' }),
+                    },
+                ],
+            },
+        ]);
+
+        const app = await buildRouteApp('./tasks/writes.js', fakeDb);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/tasks/t_video_nonce/complete',
+            payload: {
+                sessionId: 'session_nonce_1',
+                integrity: {
+                    activeSeconds: 40,
+                    backgroundSeconds: 0,
+                    contentOpened: true,
+                    openedHost: 'videos.example.com',
+                    sessionNonce: 'nonce_wrong',
+                    client: 'flutter',
+                },
+            },
+        });
+
+        expect(res.statusCode).toBe(409);
+        const body = res.json() as any;
+        if (typeof body.error === 'string') {
+            expect(body.error).toBe('Conflict');
+        } else {
+            expect(body).toMatchObject({
+                error: { code: 'CONFLICT' },
+            });
+        }
+
+        await app.close();
+    });
+
     it('wishlist add route inserts snapshot fields and added_at', async () => {
         const fakeDb = createFakeDb([
             { rows: [] }, // existing wishlist check
